@@ -1,0 +1,5 @@
+{
+  "name": "Multiplayer UNO Web Game",
+  "description": "A real-time multiplayer UNO game with custom rules, lobby system, and smooth animations.",
+  "requestFramePermissions": []
+}

@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .direction-reverse {
+    animation-direction: reverse !important;
+  }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+body {
+  @apply bg-zinc-900 text-zinc-100 antialiased;
+  overflow: hidden;
+  touch-action: manipulation;
+}
+
+.game-bg {
+  background: radial-gradient(circle at center, #1e40af 0%, #1e3a8a 50%, #172554 100%);
+  position: relative;
+  overflow: hidden;
+}
+
+.game-bg::before {
+  content: "";
+  position: absolute;
+  inset: -100%;
+  background-image: linear-gradient(45deg, rgba(255, 255, 255, 0.05) 25%, transparent 25%, transparent 50%, rgba(255, 255, 255, 0.05) 50%, rgba(255, 255, 255, 0.05) 75%, transparent 75%, transparent);
+  background-size: 4px 4px;
+  pointer-events: none;
+}
+
+/* Custom scrollbar for card hand */
+::-webkit-scrollbar {
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
