@@ -56,6 +56,19 @@ async function startServer() {
     return array;
   }
 
+  function recycleDiscardPile(room: GameState) {
+    if (room.discardPile.length <= 1) return;
+    const top = room.discardPile.pop()!;
+    const recycled = room.discardPile.map(card => {
+      if (card.value === 'wild' || card.value === 'draw4') {
+        return { ...card, color: 'wild' as CardColor };
+      }
+      return card;
+    });
+    room.drawPile = shuffle(recycled);
+    room.discardPile = [top];
+  }
+
   function getNextPlayerIndex(state: GameState, skip: number = 1): number {
     const { players, currentPlayerIndex, direction } = state;
     let nextIndex = currentPlayerIndex;
@@ -86,7 +99,7 @@ async function startServer() {
           if (topCard.value === 'draw4' && card.value === 'draw4') return true;
           return false;
         }
-        return card.color === 'wild' || card.color === topCard.color || card.value === topCard.value;
+        return card.color === 'wild' || card.value === 'wild' || card.value === 'draw4' || card.color === topCard.color || card.value === topCard.value;
       });
 
       if (playableCard) {
@@ -94,7 +107,9 @@ async function startServer() {
         const cardIndex = player.cards.indexOf(playableCard);
         player.cards.splice(cardIndex, 1);
         const playedCard = { ...playableCard };
-        if (playedCard.color === 'wild') playedCard.color = 'red'; // Default bot color
+        if (playedCard.color === 'wild' || playedCard.value === 'wild' || playedCard.value === 'draw4') {
+          playedCard.color = 'red'; // Default bot color
+        }
         room.discardPile.push(playedCard);
 
         let skip = 1;
@@ -124,11 +139,11 @@ async function startServer() {
         room.stackCount = 0;
         for (let i = 0; i < drawCount; i++) {
           if (room.drawPile.length === 0) {
-            const top = room.discardPile.pop()!;
-            room.drawPile = shuffle(room.discardPile);
-            room.discardPile = [top];
+            recycleDiscardPile(room);
           }
-          player.cards.push(room.drawPile.pop()!);
+          if (room.drawPile.length > 0) {
+            player.cards.push(room.drawPile.pop()!);
+          }
         }
         
         // Bot always skips if it can't play after drawing 1 card
@@ -342,14 +357,16 @@ async function startServer() {
         if (topCard.value === 'draw2' && (card.value === 'draw2' || card.value === 'draw4')) isValid = true;
         else if (topCard.value === 'draw4' && card.value === 'draw4') isValid = true;
       } else {
-        if (card.color === 'wild' || card.color === topCard.color || card.value === topCard.value) isValid = true;
+        if (card.color === 'wild' || card.value === 'wild' || card.value === 'draw4' || card.color === topCard.color || card.value === topCard.value) isValid = true;
       }
 
       if (!isValid) return;
 
       player.cards.splice(cardIndex, 1);
       const playedCard = { ...card };
-      if (playedCard.color === 'wild' && chosenColor) playedCard.color = chosenColor;
+      if ((playedCard.color === 'wild' || playedCard.value === 'wild' || playedCard.value === 'draw4') && chosenColor) {
+        playedCard.color = chosenColor;
+      }
       room.discardPile.push(playedCard);
 
       let skip = 1;
@@ -403,11 +420,11 @@ async function startServer() {
 
       for (let i = 0; i < drawCount; i++) {
         if (room.drawPile.length === 0) {
-          const top = room.discardPile.pop()!;
-          room.drawPile = shuffle(room.discardPile);
-          room.discardPile = [top];
+          recycleDiscardPile(room);
         }
-        player.cards.push(room.drawPile.pop()!);
+        if (room.drawPile.length > 0) {
+          player.cards.push(room.drawPile.pop()!);
+        }
       }
 
       player.hasSaidUno = false;
@@ -469,9 +486,7 @@ async function startServer() {
         if (targetPlayer) {
           for (let i = 0; i < 2; i++) {
             if (room.drawPile.length === 0) {
-              const top = room.discardPile.pop()!;
-              room.drawPile = shuffle(room.discardPile);
-              room.discardPile = [top];
+              recycleDiscardPile(room);
             }
             if (room.drawPile.length > 0) {
               targetPlayer.cards.push(room.drawPile.pop()!);

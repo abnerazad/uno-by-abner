@@ -112,7 +112,7 @@ export default function App() {
       return false;
     }
 
-    return card.color === 'wild' || card.color === topCard.color || card.value === topCard.value;
+    return card.color === 'wild' || card.value === 'wild' || card.value === 'draw4' || card.color === topCard.color || card.value === topCard.value;
   }, [roomState]);
 
   // UNO button logic
