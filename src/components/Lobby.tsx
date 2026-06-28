@@ -87,14 +87,14 @@ export const Lobby: React.FC<LobbyProps> = ({
             <div className="flex items-center gap-3">
               <button
                 onClick={() => onUpdateSettings({ startingCardCount: roomState.startingCardCount - 1 })}
-                className="w-8 h-8 bg-white border-2 border-zinc-300 rounded-lg flex items-center justify-center font-bold hover:bg-zinc-50"
+                className="w-8 h-8 bg-white border-2 border-zinc-900 text-black rounded-lg flex items-center justify-center font-black hover:bg-zinc-100 transition-colors cursor-pointer"
               >
                 -
               </button>
               <span className="font-black text-xl w-8 text-center text-zinc-900">{roomState.startingCardCount}</span>
               <button
                 onClick={() => onUpdateSettings({ startingCardCount: roomState.startingCardCount + 1 })}
-                className="w-8 h-8 bg-white border-2 border-zinc-300 rounded-lg flex items-center justify-center font-bold hover:bg-zinc-50"
+                className="w-8 h-8 bg-white border-2 border-zinc-900 text-black rounded-lg flex items-center justify-center font-black hover:bg-zinc-100 transition-colors cursor-pointer"
               >
                 +
               </button>
