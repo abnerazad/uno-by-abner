@@ -14,6 +14,7 @@ export interface Player {
   isReady: boolean;
   isBot: boolean;
   hasSaidUno: boolean;
+  hasReturnedToLobby: boolean;
 }
 
 export interface GameState {
@@ -54,4 +55,5 @@ export interface ClientToServerEvents {
   updateSettings: (settings: { startingCardCount: number }) => void;
   kickPlayer: (targetId: string) => void;
   resetToLobby: () => void;
+  returnToLobby: () => void;
 }

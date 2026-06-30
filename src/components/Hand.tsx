@@ -31,25 +31,60 @@ export const Hand: React.FC<HandProps> = ({ cards, onPlayCard, isMyTurn, canPlay
     }
   };
 
-  // Dynamically adjust gap and scale based on card count to fit screen without scroll
+  const [windowWidth, setWindowWidth] = React.useState(typeof window !== 'undefined' ? window.innerWidth : 1200);
+
+  React.useEffect(() => {
+    const handleResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
   const cardCount = cards.length;
-  
-  // More granular overlap tiers
-  const overlap = cardCount > 20 ? `-space-x-16 sm:-space-x-20 md:-space-x-28` :
-                 cardCount > 15 ? `-space-x-14 sm:-space-x-18 md:-space-x-24` :
-                 cardCount > 10 ? `-space-x-12 sm:-space-x-16 md:-space-x-20` :
-                 cardCount > 5  ? `-space-x-8 sm:-space-x-12 md:-space-x-16` :
-                 `-space-x-4 sm:-space-x-8 md:-space-x-12`;
-  
-  // More granular scaling tiers
+
+  // Get screen width breakpoints matching Tailwind classes
+  const isSm = windowWidth >= 640;
+  const isMd = windowWidth >= 768;
+
+  // Layout width (W_lay) based on Tailwind classes: w-16 (64px) / sm:w-20 (80px) / md:w-28 (112px)
+  const W_lay = isMd ? 112 : isSm ? 80 : 64;
+
+  // Scale factor based on cardCount
+  let sf = 1.0;
+  if (cardCount > 20) {
+    sf = isMd ? 0.75 : isSm ? 0.6 : 0.5;
+  } else if (cardCount > 12) {
+    sf = isMd ? 0.9 : isSm ? 0.8 : 0.7;
+  } else {
+    sf = isMd ? 1.0 : isSm ? 0.9 : 0.85;
+  }
+
+  const W_vis = W_lay * sf;
+  const containerWidth = Math.min(windowWidth - 48, 1200);
+  const totalWidthWithoutOverlap = cardCount * W_vis;
+
+  const getMarginLeft = (idx: number) => {
+    if (idx === 0) return '0px';
+    
+    const baselineOverlap = 16;
+    if (totalWidthWithoutOverlap <= containerWidth) {
+      const S = W_vis - baselineOverlap;
+      return `${S - W_lay}px`;
+    }
+    
+    // Calculate required spacing S to fit containerWidth precisely
+    // Set a minimum visible width of 24px per card so they remain legible and clickable
+    const S = Math.max(24, (containerWidth - W_vis) / (cardCount - 1));
+    return `${S - W_lay}px`;
+  };
+
   const scale = cardCount > 20 ? 'scale-[0.5] sm:scale-[0.6] md:scale-[0.75]' :
                 cardCount > 12 ? 'scale-[0.7] sm:scale-[0.8] md:scale-[0.9]' :
                 'scale-[0.85] sm:scale-[0.9] md:scale-100';
 
   return (
     <div className="fixed bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/60 to-transparent pointer-events-none z-40">
-      <div className="max-w-7xl mx-auto flex justify-center pointer-events-auto">
-        <div className={cn("flex transition-all duration-300 pb-12 items-end", overlap)}>
+      <div className="max-w-7xl mx-auto flex justify-center pointer-events-auto overflow-x-auto overflow-y-hidden no-scrollbar pt-16 pb-16 px-12">
+        <div className="flex items-end">
           <AnimatePresence>
             {cards.map((card, idx) => (
               <motion.div
@@ -59,6 +94,7 @@ export const Hand: React.FC<HandProps> = ({ cards, onPlayCard, isMyTurn, canPlay
                 animate={{ y: 0, opacity: 1 }}
                 exit={{ y: -100, opacity: 0 }}
                 transition={{ delay: idx * 0.02 }}
+                style={{ marginLeft: getMarginLeft(idx) }}
                 className="relative group hover:z-50 hover:-translate-y-8 transition-transform"
               >
                 <UnoCard

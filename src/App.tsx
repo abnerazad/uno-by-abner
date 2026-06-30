@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { nanoid } from 'nanoid';
 import { GameState, Card, CardColor, Player } from './types';
@@ -19,6 +19,7 @@ const socket: Socket = io(socketUrl, {
 
 export default function App() {
   const [roomId, setRoomId] = useState<string | null>(null);
+  const [roomCodeInput, setRoomCodeInput] = useState(() => new URLSearchParams(window.location.search).get('room') || '');
   const [name, setName] = useState(() => localStorage.getItem('uno_nickname') || '');
   const [roomState, setRoomState] = useState<GameState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -26,6 +27,8 @@ export default function App() {
   const [showUnoButton, setShowUnoButton] = useState(false);
   const [hasDismissedWinnerModal, setHasDismissedWinnerModal] = useState(false);
   const [countdown, setCountdown] = useState<number | null>(null);
+  const [isInactive, setIsInactive] = useState(false);
+  const lastActivityTime = useRef(Date.now());
 
   useEffect(() => {
     if (roomState?.autoResetAt) {
@@ -74,13 +77,39 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const handleActivity = () => {
+      lastActivityTime.current = Date.now();
+      setIsInactive(false);
+    };
+
+    window.addEventListener('mousemove', handleActivity);
+    window.addEventListener('mousedown', handleActivity);
+    window.addEventListener('keydown', handleActivity);
+    window.addEventListener('touchstart', handleActivity);
+
+    const interval = setInterval(() => {
+      if (Date.now() - lastActivityTime.current > 20000) {
+        setIsInactive(true);
+      }
+    }, 1000);
+
+    return () => {
+      window.removeEventListener('mousemove', handleActivity);
+      window.removeEventListener('mousedown', handleActivity);
+      window.removeEventListener('keydown', handleActivity);
+      window.removeEventListener('touchstart', handleActivity);
+      clearInterval(interval);
+    };
+  }, []);
+
   const joinRoom = async (e: React.FormEvent) => {
     e.preventDefault();
-    const rId = roomId || nanoid(6);
-    setRoomId(rId);
+    const finalRoomId = roomCodeInput.trim() || nanoid(6);
+    setRoomId(finalRoomId);
     localStorage.setItem('uno_nickname', name);
-    window.history.pushState({}, '', `?room=${rId}`);
-    socket.emit('joinRoom', rId, name);
+    window.history.pushState({}, '', `?room=${finalRoomId}`);
+    socket.emit('joinRoom', finalRoomId, name);
   };
 
   const toggleReady = () => socket.emit('toggleReady');
@@ -100,7 +129,8 @@ export default function App() {
   const isWinner = myPlayer ? !!roomState?.winners.includes(myPlayer.id) : false;
   const myRank = myPlayer ? roomState?.winners.indexOf(myPlayer.id) + 1 : 0;
   const isGameOver = roomState?.status === 'ended';
-  const showModal = !!roomState && isGameOver;
+  const showModal = !!roomState && isGameOver && !myPlayer?.hasReturnedToLobby;
+  const isSpectator = myPlayer ? myPlayer.cards.length === 0 : true;
 
   const canPlay = useCallback((card: Card) => {
     if (!roomState || roomState.status !== 'playing') return false;
@@ -114,6 +144,34 @@ export default function App() {
 
     return card.color === 'wild' || card.value === 'wild' || card.value === 'draw4' || card.color === topCard.color || card.value === topCard.value;
   }, [roomState]);
+
+  useEffect(() => {
+    if (!isMyTurn || !isInactive || !roomState || roomState.status !== 'playing') return;
+
+    const timer = setTimeout(() => {
+      const playableCards = myPlayer?.cards.filter(c => canPlay(c)) || [];
+      
+      if (playableCards.length > 0) {
+        const cardToPlay = playableCards[Math.floor(Math.random() * playableCards.length)];
+        const isWild = cardToPlay.color === 'wild' || cardToPlay.value === 'wild' || cardToPlay.value === 'draw4';
+        const chosenColor = isWild ? (['red', 'green', 'blue', 'yellow'] as CardColor[])[Math.floor(Math.random() * 4)] : undefined;
+        
+        if (myPlayer?.cards.length === 2) {
+          sayUno();
+        }
+        
+        playCard(cardToPlay.id, chosenColor);
+      } else {
+        if (roomState.hasDrawnThisTurn) {
+          skipTurn();
+        } else {
+          drawCard();
+        }
+      }
+    }, 2000);
+
+    return () => clearTimeout(timer);
+  }, [isMyTurn, isInactive, roomState?.currentPlayerIndex, roomState?.hasDrawnThisTurn]);
 
   // UNO button logic
   useEffect(() => {
@@ -149,11 +207,21 @@ export default function App() {
                 className="w-full px-6 py-4 bg-zinc-100 border-4 border-zinc-200 rounded-2xl font-bold text-lg text-zinc-900 focus:border-red-600 focus:outline-none transition-all"
               />
             </div>
+            <div>
+              <label className="block text-sm font-black text-zinc-900 uppercase mb-2">Room Code (Optional)</label>
+              <input
+                type="text"
+                value={roomCodeInput}
+                onChange={(e) => setRoomCodeInput(e.target.value)}
+                placeholder="Enter code to join existing room..."
+                className="w-full px-6 py-4 bg-zinc-100 border-4 border-zinc-200 rounded-2xl font-bold text-lg text-zinc-900 focus:border-red-600 focus:outline-none transition-all uppercase"
+              />
+            </div>
             <button
               type="submit"
-              className="w-full py-5 bg-red-600 text-white rounded-2xl font-black text-2xl italic shadow-lg hover:bg-red-700 hover:-translate-y-1 active:translate-y-0 transition-all"
+              className="w-full py-5 bg-red-600 text-white rounded-2xl font-black text-2xl italic shadow-lg hover:bg-red-700 hover:-translate-y-1 active:translate-y-0 transition-all cursor-pointer"
             >
-              {roomId ? 'JOIN GAME' : 'CREATE GAME'}
+              {roomCodeInput.trim() ? 'JOIN ROOM' : 'CREATE ROOM'}
             </button>
           </form>
 
@@ -168,7 +236,7 @@ export default function App() {
     );
   }
 
-  if (roomState.status === 'waiting') {
+  if (roomState.status === 'waiting' || (roomState.status === 'ended' && myPlayer?.hasReturnedToLobby)) {
     return (
       <div className="min-h-screen bg-red-600 flex items-center justify-center p-6">
         <Lobby
@@ -186,6 +254,25 @@ export default function App() {
 
   return (
     <div className="min-h-screen game-bg overflow-hidden relative select-none">
+      {/* Autoplay Active Banner */}
+      <AnimatePresence>
+        {isInactive && (
+          <motion.div
+            initial={{ opacity: 0, y: -50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -50 }}
+            className="fixed top-24 left-1/2 -translate-x-1/2 bg-yellow-500 text-black font-black italic px-6 py-3 rounded-2xl border-4 border-white shadow-xl z-50 flex items-center gap-3 animate-pulse pointer-events-auto"
+          >
+            <Zap size={24} fill="currentColor" className="animate-bounce text-black shrink-0" />
+            <span>
+              {isMyTurn 
+                ? "BOT AUTOPLAYING (MOVE MOUSE TO RESUME)" 
+                : "INACTIVE - BOT WILL PLAY FOR YOU ON YOUR TURN (MOVE MOUSE TO RESUME)"}
+            </span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Top Bar */}
       <div className="fixed top-4 left-4 right-4 flex justify-between items-start z-50 pointer-events-none">
         <button
@@ -247,8 +334,9 @@ export default function App() {
           {/* UNO Button - Always Visible near deck */}
           <div className="flex flex-col gap-2">
             <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
+              whileHover={isSpectator ? {} : { scale: 1.05 }}
+              whileTap={isSpectator ? {} : { scale: 0.95 }}
+              disabled={isSpectator}
               onClick={() => {
                 if (showUnoButton) {
                   sayUno();
@@ -259,6 +347,7 @@ export default function App() {
               }}
               className={cn(
                 "group relative px-4 py-2 md:px-6 md:py-3 rounded-full border-2 md:border-4 border-white shadow-xl transition-all duration-300",
+                isSpectator ? "bg-zinc-800 opacity-30 cursor-not-allowed" :
                 showUnoButton ? "bg-yellow-400 animate-pulse" : 
                 (roomState.missedUnoPlayers?.some(id => id !== socket.id) ? "bg-red-600 animate-bounce" : "bg-zinc-800 opacity-50")
               )}
@@ -277,11 +366,11 @@ export default function App() {
       </div>
 
       {/* Action Buttons */}
-      <div className="fixed bottom-64 left-1/2 -translate-x-1/2 flex gap-4 z-40">
+      <div className="fixed bottom-64 left-1/2 -translate-x-1/2 flex gap-4 z-50 pointer-events-auto">
         {isMyTurn && roomState.hasDrawnThisTurn && (
           <button
             onClick={skipTurn}
-            className="bg-red-600 text-white font-black italic px-8 py-4 rounded-2xl border-4 border-white hover:bg-red-700 transition-all flex items-center gap-2 shadow-xl"
+            className="bg-red-600 text-white font-black italic px-8 py-4 rounded-2xl border-4 border-white hover:bg-red-700 hover:scale-105 active:scale-95 transition-all flex items-center gap-2 shadow-xl cursor-pointer pointer-events-auto"
           >
             <SkipForward size={20} />
             SKIP TURN
@@ -336,7 +425,7 @@ export default function App() {
           onWatch={() => setHasDismissedWinnerModal(true)}
           onHome={() => {
             if (isGameOver) {
-              socket.emit('resetToLobby');
+              socket.emit('returnToLobby');
             } else {
               window.location.href = '/';
             }

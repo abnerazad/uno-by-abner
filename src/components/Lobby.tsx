@@ -66,7 +66,17 @@ export const Lobby: React.FC<LobbyProps> = ({
                   KICK
                 </button>
               )}
-              {player.isReady ? (
+              {roomState.status === 'ended' ? (
+                player.hasReturnedToLobby ? (
+                  <span className="px-2.5 py-1 bg-green-100 text-green-700 rounded-lg text-xs font-black uppercase tracking-wider">
+                    Lobby
+                  </span>
+                ) : (
+                  <span className="px-2.5 py-1 bg-zinc-100 text-zinc-500 rounded-lg text-xs font-black uppercase tracking-wider animate-pulse">
+                    Standings
+                  </span>
+                )
+              ) : player.isReady ? (
                 <CheckCircle className="text-green-500 shrink-0" />
               ) : (
                 <Circle className="text-zinc-300 shrink-0" />
@@ -106,14 +116,21 @@ export const Lobby: React.FC<LobbyProps> = ({
       <div className="flex flex-col gap-3">
         <button
           onClick={onToggleReady}
+          disabled={roomState.status === 'ended' || (roomState.players.find(p => p.id === playerId)?.isReady && roomState.status === 'waiting')}
           className={`w-full py-4 rounded-2xl font-black text-xl italic transition-all flex items-center justify-center gap-2 ${
-            roomState.players.find(p => p.id === playerId)?.isReady
+            roomState.status === 'ended'
+              ? 'bg-zinc-200 text-zinc-500 cursor-not-allowed'
+              : roomState.players.find(p => p.id === playerId)?.isReady
               ? 'bg-zinc-200 text-zinc-500 cursor-not-allowed'
               : 'bg-red-600 text-white hover:bg-red-700 hover:scale-[1.02] shadow-lg active:scale-95'
           }`}
         >
           <Play size={20} fill="currentColor" />
-          {roomState.players.find(p => p.id === playerId)?.isReady ? 'READY!' : 'READY UP'}
+          {roomState.status === 'ended' 
+            ? 'WAITING FOR PLAYERS...' 
+            : roomState.players.find(p => p.id === playerId)?.isReady 
+            ? 'READY!' 
+            : 'READY UP'}
         </button>
 
         <button

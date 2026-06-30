@@ -115,7 +115,8 @@ async function startServer() {
         let skip = 1;
         if (playedCard.value === 'skip') skip = 2;
         else if (playedCard.value === 'reverse') {
-          if (room.players.length === 2) skip = 2;
+          const activePlayersCount = room.players.filter(p => p.cards.length > 0).length;
+          if (activePlayersCount === 2) skip = 2;
           else room.direction *= -1;
         } else if (playedCard.value === 'draw2') room.stackCount += 2;
         else if (playedCard.value === 'draw4') room.stackCount += 4;
@@ -178,20 +179,25 @@ async function startServer() {
 
       setTimeout(() => {
         if (room.status === 'ended') {
-          console.log(`[ROOM ${room.roomId}] AUTO-RESETTING TO LOBBY.`);
-          room.status = 'waiting';
-          room.winners = [];
-          room.autoResetAt = null;
-          room.players = room.players.filter(p => !p.isBot);
-          room.players.forEach(p => {
-            p.cards = [];
-            p.isReady = false;
-            p.hasSaidUno = false;
-          });
-          io.to(room.roomId).emit("roomState", room);
+          console.log(`[ROOM ${room.roomId}] AUTO-RESETTING TO LOBBY (TIMEOUT).`);
+          resetRoomToLobby(room);
         }
       }, 10000);
     }
+  }
+
+  function resetRoomToLobby(room: GameState) {
+    room.status = 'waiting';
+    room.winners = [];
+    room.autoResetAt = null;
+    room.players = room.players.filter(p => !p.isBot);
+    room.players.forEach(p => {
+      p.cards = [];
+      p.isReady = false;
+      p.hasSaidUno = false;
+      p.hasReturnedToLobby = false;
+    });
+    io.to(room.roomId).emit("roomState", room);
   }
 
   io.on("connection", (socket) => {
@@ -219,28 +225,16 @@ async function startServer() {
         rooms.set(roomId, room);
       }
 
-      if (room.status === 'playing') {
-        // Allow reconnecting
-        const player = room.players.find(p => p.id === socket.id || p.name === name);
-        if (player) {
-          player.id = socket.id;
-          player.isBot = false;
-          socket.join(roomId);
-          io.to(roomId).emit("roomState", room);
-          return;
-        }
-        socket.emit("error", "Game already in progress");
-        return;
-      }
+      const trimmedName = (name || `Player ${room.players.length + 1}`).trim();
 
-      if (room.status === 'ended') {
-        // If game ended, reset to waiting if someone joins
-        room.status = 'waiting';
-        room.winners = [];
-        room.players.forEach(p => {
-          p.isReady = false;
-          p.cards = [];
-        });
+      // Allow reconnecting if it's the same socket ID, OR if the matching player is currently converted to a bot (disconnected)
+      const existingPlayer = room.players.find(p => p.id === socket.id || (p.name.toLowerCase() === trimmedName.toLowerCase() && p.isBot));
+      if (existingPlayer) {
+        existingPlayer.id = socket.id;
+        existingPlayer.isBot = false;
+        socket.join(roomId);
+        io.to(roomId).emit("roomState", room);
+        return;
       }
 
       if (room.players.length >= 16) {
@@ -248,8 +242,7 @@ async function startServer() {
         return;
       }
 
-      const trimmedName = (name || `Player ${room.players.length + 1}`).trim();
-      if (room.players.some(p => p.name.toLowerCase() === trimmedName.toLowerCase() && p.id !== socket.id)) {
+      if (room.players.some(p => p.name.toLowerCase() === trimmedName.toLowerCase())) {
         socket.emit("error", "A player with this name is already in the lobby");
         return;
       }
@@ -261,6 +254,7 @@ async function startServer() {
         isReady: false,
         isBot: false,
         hasSaidUno: false,
+        hasReturnedToLobby: false,
       };
 
       room.players.push(player);
@@ -272,16 +266,7 @@ async function startServer() {
       const roomId = Array.from(socket.rooms).find(r => r !== socket.id);
       if (!roomId) return;
       const room = rooms.get(roomId);
-      if (!room) return;
-
-      if (room.status === 'ended') {
-        room.status = 'waiting';
-        room.winners = [];
-        room.players.forEach(p => {
-          p.isReady = false;
-          p.cards = [];
-        });
-      }
+      if (!room || room.status !== 'waiting') return;
 
       const player = room.players.find(p => p.id === socket.id);
       if (player) {
@@ -323,6 +308,7 @@ async function startServer() {
         player.cards = room.drawPile.splice(0, room.startingCardCount);
         player.hasSaidUno = false;
         player.isReady = true;
+        player.hasReturnedToLobby = false;
       }
 
       let firstCard = room.drawPile.pop()!;
@@ -372,7 +358,8 @@ async function startServer() {
       let skip = 1;
       if (playedCard.value === 'skip') skip = 2;
       else if (playedCard.value === 'reverse') {
-        if (room.players.length === 2) skip = 2;
+        const activePlayersCount = room.players.filter(p => p.cards.length > 0).length;
+        if (activePlayersCount === 2) skip = 2;
         else room.direction *= -1;
       } else if (playedCard.value === 'draw2') room.stackCount += 2;
       else if (playedCard.value === 'draw4') room.stackCount += 4;
@@ -537,17 +524,31 @@ async function startServer() {
       const room = rooms.get(roomId);
       if (!room || room.status !== 'ended') return;
 
-      console.log(`[ROOM ${room.roomId}] Resetting to lobby.`);
-      room.status = 'waiting';
-      room.winners = [];
-      room.autoResetAt = null;
-      room.players = room.players.filter(p => !p.isBot);
-      room.players.forEach(p => {
-        p.cards = [];
-        p.isReady = false;
-        p.hasSaidUno = false;
-      });
-      io.to(room.roomId).emit("roomState", room);
+      console.log(`[ROOM ${room.roomId}] Resetting to lobby (force reset).`);
+      resetRoomToLobby(room);
+    });
+
+    socket.on("returnToLobby", () => {
+      const roomId = Array.from(socket.rooms).find(r => r !== socket.id);
+      if (!roomId) return;
+      const room = rooms.get(roomId);
+      if (!room || room.status !== 'ended') return;
+
+      const player = room.players.find(p => p.id === socket.id);
+      if (player) {
+        player.hasReturnedToLobby = true;
+        console.log(`[ROOM ${room.roomId}] Player ${player.name} returned to lobby.`);
+
+        const nonBotPlayers = room.players.filter(p => !p.isBot);
+        const allReturned = nonBotPlayers.every(p => p.hasReturnedToLobby);
+
+        if (allReturned) {
+          console.log(`[ROOM ${room.roomId}] All players returned. Resetting to lobby.`);
+          resetRoomToLobby(room);
+        } else {
+          io.to(roomId).emit("roomState", room);
+        }
+      }
     });
 
     socket.on("disconnect", () => {
