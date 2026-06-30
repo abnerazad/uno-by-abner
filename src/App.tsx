@@ -182,6 +182,14 @@ export default function App() {
     }
   }, [myPlayer?.cards.length, myPlayer?.hasSaidUno, roomState?.status]);
 
+  // Reset inactivity timer when it becomes my turn
+  useEffect(() => {
+    if (isMyTurn) {
+      lastActivityTime.current = Date.now();
+      setIsInactive(false);
+    }
+  }, [isMyTurn]);
+
   if (!roomState) {
     return (
       <div className="min-h-screen bg-red-600 flex items-center justify-center p-6">
@@ -256,7 +264,7 @@ export default function App() {
     <div className="min-h-screen game-bg overflow-hidden relative select-none">
       {/* Autoplay Active Banner */}
       <AnimatePresence>
-        {isInactive && (
+        {isInactive && isMyTurn && roomState?.status === 'playing' && (
           <motion.div
             initial={{ opacity: 0, y: -50 }}
             animate={{ opacity: 1, y: 0 }}
@@ -264,11 +272,7 @@ export default function App() {
             className="fixed top-24 left-1/2 -translate-x-1/2 bg-yellow-500 text-black font-black italic px-6 py-3 rounded-2xl border-4 border-white shadow-xl z-50 flex items-center gap-3 animate-pulse pointer-events-auto"
           >
             <Zap size={24} fill="currentColor" className="animate-bounce text-black shrink-0" />
-            <span>
-              {isMyTurn 
-                ? "BOT AUTOPLAYING (MOVE MOUSE TO RESUME)" 
-                : "INACTIVE - BOT WILL PLAY FOR YOU ON YOUR TURN (MOVE MOUSE TO RESUME)"}
-            </span>
+            <span>BOT AUTOPLAYING (MOVE MOUSE TO RESUME)</span>
           </motion.div>
         )}
       </AnimatePresence>
@@ -294,8 +298,8 @@ export default function App() {
       />
 
       {/* Center Area */}
-      <div className="h-screen flex items-center justify-center p-4">
-        <div className="relative flex flex-col md:flex-row items-center gap-8 md:gap-12">
+      <div className="h-screen flex items-center justify-center p-4 relative z-40 pointer-events-none">
+        <div className="relative flex flex-col md:flex-row items-center gap-8 md:gap-12 pointer-events-auto">
           {/* Draw Pile */}
           <div className="relative group">
             <button
