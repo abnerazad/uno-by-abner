@@ -27,12 +27,14 @@ export const Hand: React.FC<HandProps> = ({
   const [selectingColor, setSelectingColor] = useState<string | null>(null);
   const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Clear selection if turn ends or cards change
   useEffect(() => {
     if (!isMyTurn) {
       setSelectedCardIds([]);
       setSelectingColor(null);
+      setIsSubmitting(false);
     }
   }, [isMyTurn]);
 
@@ -59,7 +61,7 @@ export const Hand: React.FC<HandProps> = ({
 
       if (isNumberCard) {
         if (selectedCardIds.length === 0) {
-          // First card must be legally playable
+          // Rule 1: First card must be legally playable on the current discard pile
           if (!canPlay(card)) {
             setErrorMessage("This card does not match the current top card!");
             return;
@@ -70,12 +72,15 @@ export const Hand: React.FC<HandProps> = ({
 
         // We already have card(s) selected
         const firstSelectedCard = cards.find(c => c.id === selectedCardIds[0]);
-        if (firstSelectedCard && card.value === firstSelectedCard.value) {
-          // Toggle card selection
+        const selectedValue = firstSelectedCard?.value;
+
+        // If clicked a card with the same number (any color):
+        if (card.value === selectedValue) {
           if (selectedCardIds.includes(card.id)) {
+            // Deselect card
             setSelectedCardIds(prev => prev.filter(id => id !== card.id));
           } else {
-            // Append so the last clicked card is placed last (and becomes top card of discard)
+            // Append card so the last clicked card becomes the top card of discard
             setSelectedCardIds(prev => [...prev, card.id]);
           }
           return;
@@ -83,10 +88,10 @@ export const Hand: React.FC<HandProps> = ({
 
         // Clicked a card with different number
         if (canPlay(card)) {
-          // Switch primary selection to this legal card
+          // Switch primary selection to this legally playable card
           setSelectedCardIds([card.id]);
         } else {
-          setErrorMessage(`In Special Mode, all cards played together must have the same number (${firstSelectedCard?.value}).`);
+          setErrorMessage(`In Special Mode, all cards played together must have the same number (${selectedValue}).`);
         }
         return;
       }
@@ -122,9 +127,15 @@ export const Hand: React.FC<HandProps> = ({
   };
 
   const handleConfirmMultiPlay = () => {
-    if (selectedCardIds.length === 0) return;
+    if (selectedCardIds.length === 0 || isSubmitting) return;
+    if (!hasLegalTopMatch) {
+      setErrorMessage("Your selection must include at least one card matching the top card!");
+      return;
+    }
+    setIsSubmitting(true);
     onPlayCards(selectedCardIds);
     setSelectedCardIds([]);
+    setTimeout(() => setIsSubmitting(false), 500);
   };
 
   const [windowWidth, setWindowWidth] = useState(typeof window !== 'undefined' ? window.innerWidth : 1200);
@@ -173,70 +184,93 @@ export const Hand: React.FC<HandProps> = ({
     ? cards.find(c => c.id === selectedCardIds[selectedCardIds.length - 1])
     : null;
 
+  const firstSelectedCard = selectedCardIds.length > 0
+    ? cards.find(c => c.id === selectedCardIds[0])
+    : null;
+
+  const selectedNumber = firstSelectedCard?.value;
+
+  const hasLegalTopMatch = selectedCardIds.some(id => {
+    const c = cards.find(card => card.id === id);
+    return c && canPlay(c);
+  });
+
   return (
-    <div className="fixed bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/70 to-transparent pointer-events-none z-30">
-      {/* Toast Notification (e.g. Power Card Restriction) */}
+    <div className="fixed bottom-0 left-0 right-0 bg-gradient-to-t from-black/85 via-black/50 to-transparent pointer-events-none z-30 flex flex-col items-center justify-end pb-2 sm:pb-3">
+      {/* Toast Notification (e.g. Power Card Restriction or Special Mode guidance) */}
       <AnimatePresence>
         {errorMessage && (
           <motion.div
-            initial={{ opacity: 0, y: 20 }}
+            initial={{ opacity: 0, y: 15 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 20 }}
-            className="fixed bottom-40 left-1/2 -translate-x-1/2 bg-red-600 text-white font-black italic px-6 py-3 rounded-2xl border-4 border-white shadow-2xl z-50 flex items-center gap-3 text-sm md:text-base pointer-events-auto max-w-md text-center"
+            exit={{ opacity: 0, y: 15 }}
+            className="mb-3 bg-red-600 text-white font-black italic px-6 py-2.5 rounded-2xl border-4 border-white shadow-2xl z-50 flex items-center gap-3 text-xs sm:text-sm md:text-base pointer-events-auto max-w-md text-center"
           >
-            <AlertCircle size={22} className="shrink-0" />
+            <AlertCircle size={20} className="shrink-0" />
             <span>{errorMessage}</span>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Special Mode Multi-Card Action Bar */}
-      <AnimatePresence>
-        {gameMode === 'special' && isMyTurn && selectedCardIds.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 20 }}
-            className="fixed bottom-36 left-1/2 -translate-x-1/2 bg-zinc-900 border-4 border-amber-400 text-white px-6 py-3 rounded-3xl shadow-2xl z-50 flex items-center gap-4 pointer-events-auto"
-          >
-            <div className="flex items-center gap-2">
-              <Layers size={20} className="text-amber-400 animate-pulse" />
-              <div className="flex flex-col">
-                <span className="text-xs font-black uppercase text-amber-400 tracking-wider">
-                  Special Mode Multi-Play
-                </span>
-                <span className="text-sm font-bold">
-                  {selectedCardIds.length} {selectedCardIds.length === 1 ? 'card' : 'cards'} selected
-                  {lastSelectedCard && (
-                    <span className="text-zinc-400 text-xs ml-1 font-medium">
-                      (Top: {lastSelectedCard.color} {lastSelectedCard.value})
-                    </span>
-                  )}
-                </span>
+      {/* Special Mode Multi-Card Play Button Bar (Dedicated area ABOVE the Hand Card Row) */}
+      <div className="w-full flex justify-center px-4 mb-1 sm:mb-2 min-h-[52px] pointer-events-auto">
+        <AnimatePresence>
+          {gameMode === 'special' && isMyTurn && selectedCardIds.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, y: 12, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.95 }}
+              transition={{ duration: 0.18 }}
+              className="bg-zinc-900 border-4 border-amber-400 text-white px-4 py-2 sm:px-6 sm:py-2.5 rounded-2xl sm:rounded-3xl shadow-[0_12px_36px_rgba(0,0,0,0.85)] z-40 flex items-center gap-3 sm:gap-4 pointer-events-auto max-w-[96vw]"
+            >
+              <div className="flex items-center gap-2">
+                <Layers size={18} className="text-amber-400 animate-pulse shrink-0" />
+                <div className="flex flex-col">
+                  <span className="text-[10px] sm:text-xs font-black uppercase text-amber-400 tracking-wider">
+                    Special Mode Multi-Play
+                  </span>
+                  <span className="text-xs sm:text-sm font-bold flex items-center gap-1">
+                    <span>{selectedCardIds.length} {selectedCardIds.length === 1 ? 'card' : 'cards'} selected</span>
+                    {lastSelectedCard && (
+                      <span className="text-zinc-400 text-xs font-medium hidden sm:inline">
+                        (Top: {lastSelectedCard.color} {lastSelectedCard.value})
+                      </span>
+                    )}
+                  </span>
+                </div>
               </div>
-            </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setSelectedCardIds([])}
-                className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-xl font-bold text-xs uppercase tracking-wider transition-colors cursor-pointer"
-              >
-                Clear
-              </button>
-              <button
-                onClick={handleConfirmMultiPlay}
-                className="px-6 py-2.5 bg-amber-400 hover:bg-amber-500 text-zinc-950 rounded-xl font-black text-sm uppercase tracking-wider flex items-center gap-2 transition-all shadow-lg hover:scale-105 active:scale-95 cursor-pointer"
-              >
-                <Play size={16} fill="currentColor" />
-                PLAY {selectedCardIds.length > 1 ? `(${selectedCardIds.length})` : ''}
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setSelectedCardIds([])}
+                  className="px-3 py-1.5 sm:py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-xl font-bold text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                >
+                  Clear
+                </button>
+                <button
+                  type="button"
+                  disabled={!hasLegalTopMatch || isSubmitting}
+                  onClick={handleConfirmMultiPlay}
+                  title={!hasLegalTopMatch ? "Your selection must include at least one card matching the top card" : undefined}
+                  className={cn(
+                    "px-4 sm:px-6 py-2 sm:py-2.5 rounded-xl font-black text-xs sm:text-sm uppercase tracking-wider flex items-center gap-2 transition-all shadow-lg cursor-pointer",
+                    hasLegalTopMatch && !isSubmitting
+                      ? "bg-amber-400 hover:bg-amber-500 text-zinc-950 hover:scale-105 active:scale-95"
+                      : "bg-zinc-700 text-zinc-400 cursor-not-allowed opacity-60"
+                  )}
+                >
+                  <Play size={16} fill="currentColor" />
+                  {selectedCardIds.length > 1 ? `PLAY (${selectedCardIds.length}) CARDS` : 'PLAY CARD'}
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
 
-      {/* Hand Container */}
-      <div className="max-w-7xl mx-auto flex justify-center pointer-events-auto overflow-x-auto overflow-y-hidden no-scrollbar pt-12 pb-14 px-8">
+      {/* Hand Container (Cards Row, completely below the Play Button container) */}
+      <div className="max-w-7xl w-full mx-auto flex justify-center pointer-events-auto overflow-x-auto overflow-y-visible no-scrollbar pt-8 pb-3 sm:pb-4 px-4 sm:px-8">
         <div className="flex items-end">
           <AnimatePresence>
             {cards.map((card, idx) => {
@@ -247,6 +281,29 @@ export const Hand: React.FC<HandProps> = ({
               // Check if playable
               const cardIsPlayable = isMyTurn && canPlay(card);
               const isRestrictedWinningPowerCard = isMyTurn && cards.length === 1 && isPowerCard(card);
+              const isNumberCard = card.value >= '0' && card.value <= '9';
+              const isMatchingSelectedNumber = Boolean(
+                gameMode === 'special' &&
+                selectedNumber &&
+                isNumberCard &&
+                card.value === selectedNumber
+              );
+
+              // Clickability
+              let isDisabled = !isMyTurn;
+              if (isMyTurn) {
+                if (gameMode === 'special') {
+                  if (selectedCardIds.length === 0) {
+                    isDisabled = !cardIsPlayable || isRestrictedWinningPowerCard;
+                  } else {
+                    // During multi-card selection:
+                    // Enabled if already selected, or has matching number (regardless of color), or can be played on top
+                    isDisabled = !isSelected && !isMatchingSelectedNumber && !cardIsPlayable;
+                  }
+                } else {
+                  isDisabled = !cardIsPlayable || isRestrictedWinningPowerCard;
+                }
+              }
 
               return (
                 <motion.div
@@ -272,12 +329,17 @@ export const Hand: React.FC<HandProps> = ({
                   <UnoCard
                     card={card}
                     onClick={() => handleCardClick(card)}
-                    disabled={!isMyTurn || (!cardIsPlayable && !isSelected)}
+                    disabled={isDisabled}
                     className={cn(
                       "origin-bottom transition-all duration-300",
                       scale,
-                      isSelected ? 'ring-4 ring-amber-400 ring-offset-2 scale-105 z-20' :
-                      cardIsPlayable && !isRestrictedWinningPowerCard ? 'ring-4 ring-yellow-400 ring-offset-2' : '',
+                      isSelected
+                        ? 'ring-4 ring-amber-400 ring-offset-2 scale-105 z-20'
+                        : isMatchingSelectedNumber && !isDisabled
+                        ? 'ring-4 ring-amber-300 ring-offset-2 hover:scale-105 cursor-pointer shadow-[0_0_15px_rgba(251,191,36,0.5)]'
+                        : cardIsPlayable && !isRestrictedWinningPowerCard
+                        ? 'ring-4 ring-yellow-400 ring-offset-2'
+                        : '',
                       isRestrictedWinningPowerCard && 'ring-2 ring-red-500 opacity-80'
                     )}
                   />

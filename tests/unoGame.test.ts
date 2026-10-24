@@ -199,7 +199,82 @@ describe('Special Mode: Multi-Card Play with Same Number', () => {
     assert.equal(result.valid, false);
     assert.match(result.error!, /None of the selected cards/);
   });
+
+  it('Prompt Example: Red 5, Blue 5, Green 5, and Yellow 5 can be played together in Special Mode on top of Red 5', () => {
+    const red5: Card = { id: 'r5', color: 'red', value: '5' };
+    const blue5: Card = { id: 'b5', color: 'blue', value: '5' };
+    const green5: Card = { id: 'g5', color: 'green', value: '5' };
+    const yellow5: Card = { id: 'y5', color: 'yellow', value: '5' };
+    const blue7: Card = { id: 'b7', color: 'blue', value: '7' };
+    const green2: Card = { id: 'g2', color: 'green', value: '2' };
+
+    const p1 = createMockPlayer('p1', 'Player 1', [red5, blue5, green5, yellow5, blue7, green2]);
+    const room = createMockRoom([p1], 'special');
+    room.discardPile = [{ id: 'top-r5', color: 'red', value: '5' }];
+
+    const result = validateAndPreparePlay(room, p1, ['r5', 'b5', 'g5', 'y5']);
+    assert.equal(result.valid, true);
+    assert.equal(result.cardsToPlay?.length, 4);
+    assert.equal(result.skip, 1);
+  });
+
+  it('Multiple cards with the same number AND the same color continue to work in Special Mode', () => {
+    const red5a: Card = { id: 'r5a', color: 'red', value: '5' };
+    const red5b: Card = { id: 'r5b', color: 'red', value: '5' };
+    const p1 = createMockPlayer('p1', 'Player 1', [red5a, red5b, { id: 'ext', color: 'yellow', value: '9' }]);
+    const room = createMockRoom([p1], 'special');
+    room.discardPile = [{ id: 'top-r9', color: 'red', value: '9' }];
+
+    const result = validateAndPreparePlay(room, p1, ['r5a', 'r5b']);
+    assert.equal(result.valid, true);
+    assert.equal(result.cardsToPlay?.length, 2);
+  });
+
+  it('Edge Case: Initial card matches discard color, last selected card has different color, and next player must match last card', () => {
+    // Discard top: Red 2
+    // Player 1 plays Red 5, Blue 5, Green 5, Yellow 5 (Yellow 5 is last)
+    const red5: Card = { id: 'r5', color: 'red', value: '5' };
+    const blue5: Card = { id: 'b5', color: 'blue', value: '5' };
+    const green5: Card = { id: 'g5', color: 'green', value: '5' };
+    const yellow5: Card = { id: 'y5', color: 'yellow', value: '5' };
+
+    const p1 = createMockPlayer('p1', 'Player 1', [red5, blue5, green5, yellow5, { id: 'remain', color: 'blue', value: '9' }]);
+    const p2 = createMockPlayer('p2', 'Player 2', [
+      { id: 'p2-y8', color: 'yellow', value: '8' }, // matches yellow
+      { id: 'p2-g5', color: 'green', value: '5' },  // matches 5
+      { id: 'p2-g8', color: 'green', value: '8' },  // does NOT match yellow 5
+    ]);
+    const room = createMockRoom([p1, p2], 'special');
+    room.discardPile = [{ id: 'top-r2', color: 'red', value: '2' }];
+
+    const result = validateAndPreparePlay(room, p1, ['r5', 'b5', 'g5', 'y5']);
+    assert.equal(result.valid, true);
+
+    // Apply play
+    for (const card of result.cardsToPlay!) {
+      room.discardPile.push(card);
+    }
+    advanceTurn(room, result.skip!, 'playCards');
+
+    // Confirm Yellow 5 is top card
+    const topCard = room.discardPile[room.discardPile.length - 1];
+    assert.equal(topCard.color, 'yellow');
+    assert.equal(topCard.value, '5');
+
+    // Next player is Player 2
+    assert.equal(room.currentPlayerIndex, 1);
+
+    // Player 2 playing Yellow 8 is legal
+    assert.equal(validateAndPreparePlay(room, p2, ['p2-y8']).valid, true);
+
+    // Player 2 playing Green 5 is legal
+    assert.equal(validateAndPreparePlay(room, p2, ['p2-g5']).valid, true);
+
+    // Player 2 playing Green 8 is ILLEGAL (does not match yellow or 5)
+    assert.equal(validateAndPreparePlay(room, p2, ['p2-g8']).valid, false);
+  });
 });
+
 
 function playerWithCards(p: Player, cards: Card[]): Player {
   return { ...p, cards };
