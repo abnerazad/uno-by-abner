@@ -5,12 +5,24 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import { nanoid } from "nanoid";
-import type { Card, CardColor, CardValue, GameState, Player } from "./src/types.js";
+import type { Card, CardColor, CardValue, GameState, Player, GameMode } from "./src/types.js";
+import {
+  createDeck,
+  recycleDiscardPile,
+  validateAndPreparePlay,
+  advanceTurn,
+  sanitizeGameStateForClient,
+  isPowerCard,
+} from "./src/gameEngine.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
+
+interface ServerGameState extends GameState {
+  botTimeout?: NodeJS.Timeout | null;
+}
 
 async function startServer() {
   const app = express();
@@ -22,120 +34,121 @@ async function startServer() {
     },
   });
 
-  const rooms = new Map<string, GameState>();
+  const rooms = new Map<string, ServerGameState>();
 
-  function createDeck(): Card[] {
-    const colors: CardColor[] = ['red', 'green', 'blue', 'yellow'];
-    const values: CardValue[] = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'skip', 'reverse', 'draw2'];
-    const deck: Card[] = [];
+  function broadcastRoomState(room: ServerGameState) {
+    const socketsInRoom = io.sockets.adapter.rooms.get(room.roomId);
+    if (!socketsInRoom) {
+      // Room might have no active sockets, emit anyway as fallback
+      io.to(room.roomId).emit("roomState", room);
+      return;
+    }
 
-    for (const color of colors) {
-      for (const value of values) {
-        // Two of each card except 0
-        deck.push({ id: nanoid(), color, value });
-        if (value !== '0') {
-          deck.push({ id: nanoid(), color, value });
-        }
+    for (const socketId of socketsInRoom) {
+      const clientSocket = io.sockets.sockets.get(socketId);
+      if (clientSocket) {
+        clientSocket.emit("roomState", sanitizeGameStateForClient(room, socketId));
       }
     }
+  }
 
-    // Wild cards
-    for (let i = 0; i < 4; i++) {
-      deck.push({ id: nanoid(), color: 'wild', value: 'wild' });
-      deck.push({ id: nanoid(), color: 'wild', value: 'draw4' });
+  function handleBotTurn(room: ServerGameState) {
+    if (room.botTimeout) {
+      clearTimeout(room.botTimeout);
+      room.botTimeout = null;
     }
 
-    return shuffle(deck);
-  }
+    const currentIndex = room.currentPlayerIndex;
+    const player = room.players[currentIndex];
+    if (!player || !player.isBot || room.status !== 'playing') return;
 
-  function shuffle<T>(array: T[]): T[] {
-    for (let i = array.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [array[i], array[j]] = [array[j], array[i]];
-    }
-    return array;
-  }
+    room.botTimeout = setTimeout(() => {
+      room.botTimeout = null;
 
-  function recycleDiscardPile(room: GameState) {
-    if (room.discardPile.length <= 1) return;
-    const top = room.discardPile.pop()!;
-    const recycled = room.discardPile.map(card => {
-      if (card.value === 'wild' || card.value === 'draw4') {
-        return { ...card, color: 'wild' as CardColor };
-      }
-      return card;
-    });
-    room.drawPile = shuffle(recycled);
-    room.discardPile = [top];
-  }
+      // State verification after delay
+      if (room.status !== 'playing') return;
+      if (room.currentPlayerIndex !== currentIndex) return;
+      const currentBotPlayer = room.players[currentIndex];
+      if (!currentBotPlayer || !currentBotPlayer.isBot) return;
 
-  function getNextPlayerIndex(state: GameState, skip: number = 1): number {
-    const { players, currentPlayerIndex, direction } = state;
-    let nextIndex = currentPlayerIndex;
-    
-    for (let i = 0; i < skip; i++) {
-      nextIndex = (nextIndex + direction) % players.length;
-      if (nextIndex < 0) nextIndex += players.length;
-      
-      // Skip players who have already finished (0 cards)
-      while (players[nextIndex].cards.length === 0) {
-        nextIndex = (nextIndex + direction) % players.length;
-        if (nextIndex < 0) nextIndex += players.length;
-      }
-    }
-    
-    return nextIndex;
-  }
-
-  function handleBotTurn(room: GameState) {
-    const player = room.players[room.currentPlayerIndex];
-    if (!player.isBot || room.status !== 'playing') return;
-
-    setTimeout(() => {
       const topCard = room.discardPile[room.discardPile.length - 1];
-      const playableCard = player.cards.find(card => {
+
+      // Find playable card respecting power-card ending restriction
+      const playableCard = currentBotPlayer.cards.find(card => {
+        // Enforce rule: cannot finish with power card (+2 or +4)
+        if (currentBotPlayer.cards.length === 1 && isPowerCard(card)) {
+          return false;
+        }
+
         if (room.stackCount > 0) {
           if (topCard.value === 'draw2' && (card.value === 'draw2' || card.value === 'draw4')) return true;
           if (topCard.value === 'draw4' && card.value === 'draw4') return true;
           return false;
         }
-        return card.color === 'wild' || card.value === 'wild' || card.value === 'draw4' || card.color === topCard.color || card.value === topCard.value;
+        return (
+          card.color === 'wild' ||
+          card.value === 'wild' ||
+          card.value === 'draw4' ||
+          card.color === topCard.color ||
+          card.value === topCard.value
+        );
       });
 
       if (playableCard) {
-        // Play it
-        const cardIndex = player.cards.indexOf(playableCard);
-        player.cards.splice(cardIndex, 1);
-        const playedCard = { ...playableCard };
-        if (playedCard.color === 'wild' || playedCard.value === 'wild' || playedCard.value === 'draw4') {
-          playedCard.color = 'red'; // Default bot color
+        // In Special Mode, bot checks if it has additional number cards of the same value
+        const cardsToPlay = [playableCard];
+        if (room.gameMode === 'special' && playableCard.value >= '0' && playableCard.value <= '9') {
+          const matchingCards = currentBotPlayer.cards.filter(
+            c => c.id !== playableCard.id && c.value === playableCard.value
+          );
+          cardsToPlay.push(...matchingCards);
         }
-        room.discardPile.push(playedCard);
 
+        // Remove cards from bot's hand
+        for (const c of cardsToPlay) {
+          const idx = currentBotPlayer.cards.findIndex(card => card.id === c.id);
+          if (idx !== -1) currentBotPlayer.cards.splice(idx, 1);
+        }
+
+        // Add played cards to discard pile (last one on top)
+        for (let i = 0; i < cardsToPlay.length; i++) {
+          const playedCard = { ...cardsToPlay[i] };
+          if (playedCard.color === 'wild' || playedCard.value === 'wild' || playedCard.value === 'draw4') {
+            playedCard.color = 'red'; // Default bot color choice
+          }
+          room.discardPile.push(playedCard);
+        }
+
+        const primaryCard = cardsToPlay[cardsToPlay.length - 1];
         let skip = 1;
-        if (playedCard.value === 'skip') skip = 2;
-        else if (playedCard.value === 'reverse') {
-          const activePlayersCount = room.players.filter(p => p.cards.length > 0).length;
-          if (activePlayersCount === 2) skip = 2;
-          else room.direction *= -1;
-        } else if (playedCard.value === 'draw2') room.stackCount += 2;
-        else if (playedCard.value === 'draw4') room.stackCount += 4;
+        if (cardsToPlay.length === 1) {
+          if (primaryCard.value === 'skip') skip = 2;
+          else if (primaryCard.value === 'reverse') {
+            const activePlayersCount = room.players.filter(p => p.cards.length > 0).length;
+            if (activePlayersCount === 2) skip = 2;
+            else room.direction = (room.direction * -1) as 1 | -1;
+          } else if (primaryCard.value === 'draw2') room.stackCount += 2;
+          else if (primaryCard.value === 'draw4') room.stackCount += 4;
+        }
 
-        if (player.cards.length === 1) player.hasSaidUno = true;
-        
-        if (player.cards.length === 0) {
-          if (!room.winners.includes(player.id)) {
-            room.winners.push(player.id);
+        if (currentBotPlayer.cards.length === 1) currentBotPlayer.hasSaidUno = true;
+
+        if (currentBotPlayer.cards.length === 0) {
+          if (!room.winners.includes(currentBotPlayer.id)) {
+            room.winners.push(currentBotPlayer.id);
           }
           checkGameEnd(room);
         }
 
         if (room.status === 'playing') {
-          room.currentPlayerIndex = getNextPlayerIndex(room, skip);
-          room.hasDrawnThisTurn = false;
+          advanceTurn(
+            room,
+            skip,
+            cardsToPlay.length > 1 ? `botPlayCards (${cardsToPlay.length})` : `botPlayCard (${primaryCard.value})`
+          );
         }
       } else {
-        // Draw
+        // Bot must draw
         const drawCount = room.stackCount > 0 ? room.stackCount : 1;
         room.stackCount = 0;
         for (let i = 0; i < drawCount; i++) {
@@ -143,30 +156,34 @@ async function startServer() {
             recycleDiscardPile(room);
           }
           if (room.drawPile.length > 0) {
-            player.cards.push(room.drawPile.pop()!);
+            currentBotPlayer.cards.push(room.drawPile.pop()!);
           }
         }
-        
-        // Bot always skips if it can't play after drawing 1 card
-        // Or plays if it can. For simplicity, just pass turn.
-        room.currentPlayerIndex = getNextPlayerIndex(room);
-        room.hasDrawnThisTurn = false;
+
+        // Pass bot turn
+        advanceTurn(room, 1, 'botDrawPass');
       }
-      io.to(room.roomId).emit("roomState", room);
+
+      broadcastRoomState(room);
       if (room.status === 'playing') handleBotTurn(room);
     }, 2000);
   }
 
-  function checkGameEnd(room: GameState) {
+  function checkGameEnd(room: ServerGameState) {
     const activePlayers = room.players.filter(p => p.cards.length > 0);
     console.log(`[ROOM ${room.roomId}] Active players left: ${activePlayers.length} / Total: ${room.players.length}`);
-    
+
     if (activePlayers.length <= 1) {
       if (room.status === 'ended') return;
-      
+
       console.log(`[ROOM ${room.roomId}] MATCH ENDED. FINAL WINNERS LIST:`, room.winners);
       room.status = 'ended';
       room.autoResetAt = Date.now() + 10000; // 10 seconds redirect
+
+      if (room.botTimeout) {
+        clearTimeout(room.botTimeout);
+        room.botTimeout = null;
+      }
 
       if (activePlayers.length === 1) {
         const lastPlayer = activePlayers[0];
@@ -174,8 +191,8 @@ async function startServer() {
           room.winners.push(lastPlayer.id);
         }
       }
-      
-      io.to(room.roomId).emit("roomState", room);
+
+      broadcastRoomState(room);
 
       setTimeout(() => {
         if (room.status === 'ended') {
@@ -186,7 +203,11 @@ async function startServer() {
     }
   }
 
-  function resetRoomToLobby(room: GameState) {
+  function resetRoomToLobby(room: ServerGameState) {
+    if (room.botTimeout) {
+      clearTimeout(room.botTimeout);
+      room.botTimeout = null;
+    }
     room.status = 'waiting';
     room.winners = [];
     room.autoResetAt = null;
@@ -197,13 +218,46 @@ async function startServer() {
       p.hasSaidUno = false;
       p.hasReturnedToLobby = false;
     });
-    io.to(room.roomId).emit("roomState", room);
+    broadcastRoomState(room);
+  }
+
+  function startGame(room: ServerGameState) {
+    room.status = 'playing';
+    room.drawPile = createDeck();
+    room.discardPile = [];
+    room.currentPlayerIndex = 0;
+    room.direction = 1;
+    room.stackCount = 0;
+    room.winner = null;
+    room.winners = [];
+    room.hasDrawnThisTurn = false;
+    room.missedUnoPlayers = [];
+    room.autoResetAt = null;
+    room.turnCount = 0;
+
+    for (const player of room.players) {
+      player.cards = room.drawPile.splice(0, room.startingCardCount);
+      player.hasSaidUno = false;
+      player.isReady = true;
+      player.hasReturnedToLobby = false;
+    }
+
+    let firstCard = room.drawPile.pop()!;
+    while (firstCard.color === 'wild') {
+      room.drawPile.unshift(firstCard);
+      firstCard = room.drawPile.pop()!;
+    }
+    room.discardPile.push(firstCard);
+
+    console.log(`[ROOM ${room.roomId}] Game started in Mode: "${room.gameMode}". First top card: ${firstCard.color} ${firstCard.value}`);
+    broadcastRoomState(room);
+    handleBotTurn(room);
   }
 
   io.on("connection", (socket) => {
     console.log("User connected:", socket.id);
 
-    socket.on("joinRoom", (roomId: string, name: string) => {
+    socket.on("joinRoom", (roomId: string, name: string, sessionToken?: string) => {
       let room = rooms.get(roomId);
       if (!room) {
         room = {
@@ -221,19 +275,43 @@ async function startServer() {
           startingCardCount: 7,
           missedUnoPlayers: [],
           autoResetAt: null,
+          gameMode: 'normal',
+          turnCount: 0,
+          botTimeout: null,
         };
         rooms.set(roomId, room);
       }
 
       const trimmedName = (name || `Player ${room.players.length + 1}`).trim();
 
-      // Allow reconnecting if it's the same socket ID, OR if the matching player is currently converted to a bot (disconnected)
-      const existingPlayer = room.players.find(p => p.id === socket.id || (p.name.toLowerCase() === trimmedName.toLowerCase() && p.isBot));
+      // Check for existing player (by persistent sessionToken, socket.id, or name for disconnected bots)
+      const existingPlayer = room.players.find(
+        p => (sessionToken && p.sessionToken === sessionToken) ||
+             p.id === socket.id ||
+             (p.name.toLowerCase() === trimmedName.toLowerCase() && p.isBot)
+      );
+
       if (existingPlayer) {
+        const oldId = existingPlayer.id;
         existingPlayer.id = socket.id;
+        if (sessionToken) existingPlayer.sessionToken = sessionToken;
         existingPlayer.isBot = false;
+
+        // Cancel bot timeout if scheduled for this player
+        if (room.botTimeout && room.players[room.currentPlayerIndex]?.id === socket.id) {
+          clearTimeout(room.botTimeout);
+          room.botTimeout = null;
+        }
+
         socket.join(roomId);
-        io.to(roomId).emit("roomState", room);
+        console.log(`[ROOM ${roomId}] Player "${existingPlayer.name}" reconnected (socket: ${socket.id}, was ${oldId}). Player index: ${room.players.indexOf(existingPlayer)}.`);
+        broadcastRoomState(room);
+        return;
+      }
+
+      // If game is already active, reject new players from interrupting turn order
+      if (room.status !== 'waiting') {
+        socket.emit("error", "Game is already in progress in this room");
         return;
       }
 
@@ -255,11 +333,46 @@ async function startServer() {
         isBot: false,
         hasSaidUno: false,
         hasReturnedToLobby: false,
+        sessionToken: sessionToken || nanoid(),
       };
 
       room.players.push(player);
       socket.join(roomId);
-      io.to(roomId).emit("roomState", room);
+      console.log(`[ROOM ${roomId}] Player "${trimmedName}" joined at position ${room.players.length - 1} (socket: ${socket.id}).`);
+      broadcastRoomState(room);
+    });
+
+    socket.on("changeName", (newName: string) => {
+      const roomId = Array.from(socket.rooms).find(r => r !== socket.id);
+      if (!roomId) return;
+      const room = rooms.get(roomId);
+      if (!room) return;
+
+      const player = room.players.find(p => p.id === socket.id);
+      if (!player) return;
+
+      const trimmed = (newName || '').trim();
+      if (!trimmed || trimmed.length === 0) {
+        socket.emit("error", "Player name cannot be empty");
+        return;
+      }
+      if (trimmed.length > 20) {
+        socket.emit("error", "Player name cannot exceed 20 characters");
+        return;
+      }
+
+      const isTaken = room.players.some(
+        p => p.id !== socket.id && p.name.toLowerCase() === trimmed.toLowerCase()
+      );
+      if (isTaken) {
+        socket.emit("error", "A player with this name is already in the room");
+        return;
+      }
+
+      const oldName = player.name;
+      player.name = trimmed;
+      console.log(`[ROOM ${room.roomId}] Player "${oldName}" changed name to "${trimmed}" (id: ${socket.id}, position: ${room.players.indexOf(player)}). Turn order preserved.`);
+      broadcastRoomState(room);
     });
 
     socket.on("toggleReady", () => {
@@ -271,7 +384,7 @@ async function startServer() {
       const player = room.players.find(p => p.id === socket.id);
       if (player) {
         player.isReady = !player.isReady;
-        io.to(roomId).emit("roomState", room);
+        broadcastRoomState(room);
 
         if (room.players.length >= 2 && room.players.every(p => p.isReady)) {
           startGame(room);
@@ -279,90 +392,79 @@ async function startServer() {
       }
     });
 
-    socket.on("updateSettings", (settings: { startingCardCount: number }) => {
+    socket.on("updateSettings", (settings: { startingCardCount?: number; gameMode?: GameMode }) => {
       const roomId = Array.from(socket.rooms).find(r => r !== socket.id);
       if (!roomId) return;
       const room = rooms.get(roomId);
       if (!room || room.status !== 'waiting') return;
 
-      if (room.players[0].id === socket.id) {
-        room.startingCardCount = Math.max(1, Math.min(15, settings.startingCardCount));
-        io.to(roomId).emit("roomState", room);
+      if (room.players[0]?.id === socket.id) {
+        if (typeof settings.startingCardCount === 'number') {
+          room.startingCardCount = Math.max(1, Math.min(15, settings.startingCardCount));
+        }
+        if (settings.gameMode === 'normal' || settings.gameMode === 'special') {
+          room.gameMode = settings.gameMode;
+          console.log(`[ROOM ${room.roomId}] Host set game mode to "${room.gameMode}".`);
+        }
+        broadcastRoomState(room);
       }
     });
 
-    function startGame(room: GameState) {
-      room.status = 'playing';
-      room.drawPile = createDeck();
-      room.discardPile = [];
-      room.currentPlayerIndex = 0;
-      room.direction = 1;
-      room.stackCount = 0;
-      room.winner = null;
-      room.winners = [];
-      room.hasDrawnThisTurn = false;
-      room.missedUnoPlayers = [];
-      room.autoResetAt = null;
+    socket.on("setGameMode", (gameMode: GameMode) => {
+      const roomId = Array.from(socket.rooms).find(r => r !== socket.id);
+      if (!roomId) return;
+      const room = rooms.get(roomId);
+      if (!room || room.status !== 'waiting') return;
 
-      for (const player of room.players) {
-        player.cards = room.drawPile.splice(0, room.startingCardCount);
-        player.hasSaidUno = false;
-        player.isReady = true;
-        player.hasReturnedToLobby = false;
+      if (room.players[0]?.id === socket.id) {
+        if (gameMode === 'normal' || gameMode === 'special') {
+          room.gameMode = gameMode;
+          console.log(`[ROOM ${room.roomId}] Host updated game mode to "${room.gameMode}".`);
+          broadcastRoomState(room);
+        }
       }
+    });
 
-      let firstCard = room.drawPile.pop()!;
-      while (firstCard.color === 'wild') {
-        room.drawPile.unshift(firstCard);
-        firstCard = room.drawPile.pop()!;
-      }
-      room.discardPile.push(firstCard);
-
-      io.to(room.roomId).emit("roomState", room);
-      handleBotTurn(room);
-    }
-
-    socket.on("playCard", (cardId: string, chosenColor?: CardColor) => {
+    // Core play handler supporting both multi-card and single-card plays
+    function handlePlayCards(cardIds: string[], chosenColor?: CardColor) {
       const roomId = Array.from(socket.rooms).find(r => r !== socket.id);
       if (!roomId) return;
       const room = rooms.get(roomId);
       if (!room || room.status !== 'playing') return;
 
       const playerIndex = room.players.findIndex(p => p.id === socket.id);
-      if (playerIndex !== room.currentPlayerIndex) return;
+      if (playerIndex !== room.currentPlayerIndex) {
+        socket.emit("error", "It is not your turn");
+        return;
+      }
 
       const player = room.players[playerIndex];
-      const cardIndex = player.cards.findIndex(c => c.id === cardId);
-      if (cardIndex === -1) return;
+      const validation = validateAndPreparePlay(room, player, cardIds, chosenColor);
 
-      const card = player.cards[cardIndex];
-      const topCard = room.discardPile[room.discardPile.length - 1];
-
-      let isValid = false;
-      if (room.stackCount > 0) {
-        if (topCard.value === 'draw2' && (card.value === 'draw2' || card.value === 'draw4')) isValid = true;
-        else if (topCard.value === 'draw4' && card.value === 'draw4') isValid = true;
-      } else {
-        if (card.color === 'wild' || card.value === 'wild' || card.value === 'draw4' || card.color === topCard.color || card.value === topCard.value) isValid = true;
+      if (!validation.valid) {
+        socket.emit("error", validation.error || "Invalid play");
+        return;
       }
 
-      if (!isValid) return;
+      const { cardsToPlay, skip, newDirection, addedStackCount, lastCardColor } = validation;
 
-      player.cards.splice(cardIndex, 1);
-      const playedCard = { ...card };
-      if ((playedCard.color === 'wild' || playedCard.value === 'wild' || playedCard.value === 'draw4') && chosenColor) {
-        playedCard.color = chosenColor;
+      // Remove cards from player's hand
+      for (const card of cardsToPlay!) {
+        const idx = player.cards.findIndex(c => c.id === card.id);
+        if (idx !== -1) player.cards.splice(idx, 1);
       }
-      room.discardPile.push(playedCard);
 
-      let skip = 1;
-      if (playedCard.value === 'skip') skip = 2;
-      else if (playedCard.value === 'reverse') {
-        const activePlayersCount = room.players.filter(p => p.cards.length > 0).length;
-        if (activePlayersCount === 2) skip = 2;
-        else room.direction *= -1;
-      } else if (playedCard.value === 'draw2') room.stackCount += 2;
-      else if (playedCard.value === 'draw4') room.stackCount += 4;
+      // Add cards to discard pile in selected order, so last selected card is on top
+      for (let i = 0; i < cardsToPlay!.length; i++) {
+        const card = { ...cardsToPlay![i] };
+        if (i === cardsToPlay!.length - 1 && lastCardColor) {
+          card.color = lastCardColor;
+        }
+        room.discardPile.push(card);
+      }
+
+      if (newDirection) room.direction = newDirection;
+      if (addedStackCount) room.stackCount += addedStackCount;
 
       if (player.cards.length === 0) {
         if (!room.winners.includes(player.id)) {
@@ -375,20 +477,30 @@ async function startServer() {
           if (room.status === 'playing' && player.cards.length === 1 && !player.hasSaidUno) {
             if (!room.missedUnoPlayers.includes(player.id)) {
               room.missedUnoPlayers.push(player.id);
-              io.to(roomId).emit("roomState", room);
+              broadcastRoomState(room);
             }
           }
         }, 2000);
       }
 
       if (room.status === 'playing') {
-        room.currentPlayerIndex = getNextPlayerIndex(room, skip);
-        room.hasDrawnThisTurn = false;
-        console.log(`[ROOM ${room.roomId}] Turn passed to player index ${room.currentPlayerIndex} (${room.players[room.currentPlayerIndex].name})`);
+        advanceTurn(
+          room,
+          skip || 1,
+          cardsToPlay!.length > 1 ? `playCards (${cardsToPlay!.length})` : `playCard (${cardsToPlay![0].value})`
+        );
       }
-      
-      io.to(roomId).emit("roomState", room);
+
+      broadcastRoomState(room);
       if (room.status === 'playing') handleBotTurn(room);
+    }
+
+    socket.on("playCards", (cardIds: string[], chosenColor?: CardColor) => {
+      handlePlayCards(cardIds, chosenColor);
+    });
+
+    socket.on("playCard", (cardId: string, chosenColor?: CardColor) => {
+      handlePlayCards([cardId], chosenColor);
     });
 
     socket.on("drawCard", () => {
@@ -401,7 +513,6 @@ async function startServer() {
       if (playerIndex !== room.currentPlayerIndex) return;
 
       const player = room.players[playerIndex];
-      
       const drawCount = room.stackCount > 0 ? room.stackCount : 1;
       room.stackCount = 0;
 
@@ -418,15 +529,13 @@ async function startServer() {
       room.missedUnoPlayers = room.missedUnoPlayers.filter(id => id !== player.id);
 
       if (drawCount > 1) {
-        room.currentPlayerIndex = getNextPlayerIndex(room);
-        room.hasDrawnThisTurn = false;
-        console.log(`[ROOM ${room.roomId}] Player drew penalty cards. Turn passed to player index ${room.currentPlayerIndex}`);
+        advanceTurn(room, 1, `drawPenalty (${drawCount})`);
       } else {
         room.hasDrawnThisTurn = true;
-        console.log(`[ROOM ${room.roomId}] Player ${player.name} drew a card. Now has ${player.cards.length} cards.`);
+        console.log(`[ROOM ${room.roomId}] Player ${player.name} drew 1 card (now holds ${player.cards.length} cards).`);
       }
 
-      io.to(roomId).emit("roomState", room);
+      broadcastRoomState(room);
       if (room.status === 'playing') handleBotTurn(room);
     });
 
@@ -441,10 +550,8 @@ async function startServer() {
 
       if (!room.hasDrawnThisTurn) return;
 
-      room.currentPlayerIndex = getNextPlayerIndex(room);
-      room.hasDrawnThisTurn = false;
-      console.log(`[ROOM ${room.roomId}] Player skipped/passed. Turn passed to player index ${room.currentPlayerIndex}`);
-      io.to(roomId).emit("roomState", room);
+      advanceTurn(room, 1, 'skipTurn');
+      broadcastRoomState(room);
       handleBotTurn(room);
     });
 
@@ -458,7 +565,7 @@ async function startServer() {
       if (player && player.cards.length <= 2) {
         player.hasSaidUno = true;
         room.missedUnoPlayers = room.missedUnoPlayers.filter(id => id !== player.id);
-        io.to(roomId).emit("roomState", room);
+        broadcastRoomState(room);
       }
     });
 
@@ -480,8 +587,42 @@ async function startServer() {
             }
           }
           room.missedUnoPlayers = room.missedUnoPlayers.filter(id => id !== targetId);
-          io.to(roomId).emit("roomState", room);
+          broadcastRoomState(room);
         }
+      }
+    });
+
+    let lastEasterEggTime = 0;
+
+    // Easter Egg: Rapidly click warning icon 10 times to grant a +2 or +4 card
+    socket.on("easterEggCard", (choice: '+2' | '+4', color?: CardColor) => {
+      const roomId = Array.from(socket.rooms).find(r => r !== socket.id);
+      if (!roomId) return;
+      const room = rooms.get(roomId);
+      if (!room || room.status !== 'playing') return;
+
+      const player = room.players.find(p => p.id === socket.id);
+      if (!player) return;
+
+      // Prevent duplicated or spam requests from granting extra cards
+      const now = Date.now();
+      if (now - lastEasterEggTime < 2000) return;
+      lastEasterEggTime = now;
+
+      let newCard: Card | null = null;
+      if (choice === '+2') {
+        const validColors: CardColor[] = ['red', 'green', 'blue', 'yellow'];
+        const chosenColor = color && validColors.includes(color) ? color : 'red';
+        newCard = { id: nanoid(), color: chosenColor, value: 'draw2' };
+      } else if (choice === '+4') {
+        newCard = { id: nanoid(), color: 'wild', value: 'draw4' };
+      }
+
+      if (newCard) {
+        player.cards.push(newCard);
+        player.hasSaidUno = false;
+        console.log(`[ROOM ${room.roomId}] EASTER EGG: Player "${player.name}" granted ${newCard.color} ${newCard.value}. Hand count now: ${player.cards.length}`);
+        broadcastRoomState(room);
       }
     });
 
@@ -498,23 +639,25 @@ async function startServer() {
       if (targetPlayerIndex !== -1) {
         const kickedPlayer = room.players[targetPlayerIndex];
         console.log(`[ROOM ${room.roomId}] Player ${kickedPlayer.name} was kicked by Admin.`);
-        
+
         const kickedSocket = io.sockets.sockets.get(targetId);
         if (kickedSocket) {
           kickedSocket.emit("error", "You have been kicked from the lobby");
           kickedSocket.leave(roomId);
         }
-        
+
         room.players.splice(targetPlayerIndex, 1);
-        
+
         if (room.status === 'playing') {
-          if (room.currentPlayerIndex >= room.players.length) {
+          if (targetPlayerIndex < room.currentPlayerIndex) {
+            room.currentPlayerIndex = Math.max(0, room.currentPlayerIndex - 1);
+          } else if (room.currentPlayerIndex >= room.players.length) {
             room.currentPlayerIndex = 0;
           }
           checkGameEnd(room);
         }
 
-        io.to(roomId).emit("roomState", room);
+        broadcastRoomState(room);
       }
     });
 
@@ -546,7 +689,7 @@ async function startServer() {
           console.log(`[ROOM ${room.roomId}] All players returned. Resetting to lobby.`);
           resetRoomToLobby(room);
         } else {
-          io.to(roomId).emit("roomState", room);
+          broadcastRoomState(room);
         }
       }
     });
@@ -559,14 +702,15 @@ async function startServer() {
           if (room.status === 'waiting') {
             room.players.splice(playerIndex, 1);
             if (room.players.length === 0) {
+              if (room.botTimeout) clearTimeout(room.botTimeout);
               rooms.delete(roomId);
             } else {
-              io.to(roomId).emit("roomState", room);
+              broadcastRoomState(room);
             }
           } else {
-            // Mark as bot or handle disconnect in-game
+            // Mark as bot in-game
             room.players[playerIndex].isBot = true;
-            io.to(roomId).emit("roomState", room);
+            broadcastRoomState(room);
             handleBotTurn(room);
           }
         }
