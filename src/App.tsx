@@ -31,6 +31,59 @@ export default function App() {
   const [isInactive, setIsInactive] = useState(false);
   const lastActivityTime = useRef(Date.now());
 
+  // Sequential multi-card animation state and completion-driven queue refs
+  const [displayedTopCard, setDisplayedTopCard] = useState<Card | null>(null);
+  const cardQueueRef = useRef<Card[]>([]);
+  const currentAnimatingCardIdRef = useRef<string | null>(null);
+  const emergencyRecoveryTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const prevDiscardLenRef = useRef<number>(0);
+  const prevRoomIdRef = useRef<string | null>(null);
+
+  const clearEmergencyRecovery = useCallback(() => {
+    if (emergencyRecoveryTimerRef.current) {
+      clearTimeout(emergencyRecoveryTimerRef.current);
+      emergencyRecoveryTimerRef.current = null;
+    }
+  }, []);
+
+  const startEmergencyRecovery = useCallback((expectedCardId: string, authoritativeFinalCard: Card) => {
+    clearEmergencyRecovery();
+    // Safety recovery (4000ms): If Framer Motion's onAnimationComplete genuinely fails to fire
+    // (e.g. browser tab suspended / backgrounded), safely resolve directly to the authoritative
+    // final card instead of stepping intermediate cards.
+    emergencyRecoveryTimerRef.current = setTimeout(() => {
+      if (currentAnimatingCardIdRef.current === expectedCardId) {
+        cardQueueRef.current = [];
+        currentAnimatingCardIdRef.current = null;
+        setDisplayedTopCard(authoritativeFinalCard);
+      }
+    }, 4000);
+  }, [clearEmergencyRecovery]);
+
+  const advanceQueue = useCallback((completedCardId: string) => {
+    // 1. Guard against duplicate or stale completion callbacks:
+    // Only accept completion for the card currently actively animating!
+    if (currentAnimatingCardIdRef.current !== completedCardId) return;
+
+    clearEmergencyRecovery();
+
+    // 2. Normal queue progression: Advance to next card in sequence ONLY when current card completes
+    if (cardQueueRef.current.length > 0) {
+      const nextCard = cardQueueRef.current.shift()!;
+      currentAnimatingCardIdRef.current = nextCard.id;
+      setDisplayedTopCard(nextCard);
+
+      // The final card in the queue remains the authoritative top card for safety recovery
+      const finalCard = cardQueueRef.current.length > 0
+        ? cardQueueRef.current[cardQueueRef.current.length - 1]
+        : nextCard;
+      startEmergencyRecovery(nextCard.id, finalCard);
+    } else {
+      // Sequence completed: final selected card remains displayed on top
+      currentAnimatingCardIdRef.current = null;
+    }
+  }, [clearEmergencyRecovery, startEmergencyRecovery]);
+
   // Tab-isolated session token per room to ensure multiple tabs are distinct players
   const getSessionTokenForRoom = (targetRoomId: string): string => {
     try {
@@ -92,6 +145,50 @@ export default function App() {
         window.history.pushState({}, '', window.location.pathname);
         return;
       }
+
+      // Check if new cards were added to discard pile
+      const currPile = state.discardPile || [];
+      const prevLen = prevDiscardLenRef.current;
+      const isSameRoomAndPlaying = prevRoomIdRef.current === state.roomId && state.status === 'playing';
+
+      if (!isSameRoomAndPlaying || currPile.length <= 1) {
+        // Room changed, game not playing, or initial discard card:
+        clearEmergencyRecovery();
+        cardQueueRef.current = [];
+        currentAnimatingCardIdRef.current = null;
+        prevDiscardLenRef.current = currPile.length;
+        prevRoomIdRef.current = state.roomId;
+        if (currPile.length > 0) {
+          setDisplayedTopCard(currPile[currPile.length - 1]);
+        }
+      } else if (currPile.length > prevLen) {
+        const addedCards = currPile.slice(prevLen);
+        prevDiscardLenRef.current = currPile.length;
+
+        if (currentAnimatingCardIdRef.current !== null) {
+          // Animation already in progress (e.g. rapid consecutive turns):
+          // Enqueue the new cards so they animate sequentially in order
+          cardQueueRef.current.push(...addedCards);
+        } else {
+          // Start animating the first card immediately
+          const firstCard = addedCards[0];
+          const remainingCards = addedCards.slice(1);
+          const finalCard = addedCards[addedCards.length - 1];
+
+          cardQueueRef.current = remainingCards;
+          currentAnimatingCardIdRef.current = firstCard.id;
+          setDisplayedTopCard(firstCard);
+
+          startEmergencyRecovery(firstCard.id, finalCard);
+        }
+      } else {
+        // Discard pile shrank (e.g. deck recycled) or stayed same length
+        prevDiscardLenRef.current = currPile.length;
+        if (currPile.length > 0 && currentAnimatingCardIdRef.current === null) {
+          setDisplayedTopCard(currPile[currPile.length - 1]);
+        }
+      }
+
       setRoomState(state);
       setError(null);
       // Reset dismissal if a new game starts or we're back in lobby
@@ -105,11 +202,32 @@ export default function App() {
     });
 
     return () => {
+      clearEmergencyRecovery();
+      cardQueueRef.current = [];
+      currentAnimatingCardIdRef.current = null;
       socket.off('connect');
       socket.off('roomState');
       socket.off('error');
     };
-  }, []);
+  }, [clearEmergencyRecovery, startEmergencyRecovery]);
+
+  // Tab visibility recovery: if user returns from another tab, cleanly display authoritative top card
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        if (cardQueueRef.current.length > 0 && roomState?.discardPile?.length) {
+          clearEmergencyRecovery();
+          const topCard = roomState.discardPile[roomState.discardPile.length - 1];
+          cardQueueRef.current = [];
+          currentAnimatingCardIdRef.current = null;
+          setDisplayedTopCard(topCard);
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [roomState?.discardPile, clearEmergencyRecovery]);
 
   useEffect(() => {
     const handleActivity = () => {
@@ -331,6 +449,7 @@ export default function App() {
   }
 
   const topCard = roomState.discardPile[roomState.discardPile.length - 1];
+  const activeDiscardCard = displayedTopCard || topCard;
 
   return (
     <div className="min-h-screen game-bg overflow-hidden relative select-none">
@@ -399,14 +518,17 @@ export default function App() {
           {/* Discard Pile */}
           <div className="relative">
             <AnimatePresence mode="popLayout">
-              <motion.div
-                key={topCard.id}
-                initial={{ scale: 1.5, opacity: 0, rotate: 45 }}
-                animate={{ scale: 1, opacity: 1, rotate: 0 }}
-                transition={{ type: 'spring', damping: 12 }}
-              >
-                <UnoCard card={topCard} size="lg" disabled />
-              </motion.div>
+              {activeDiscardCard && (
+                <motion.div
+                  key={activeDiscardCard.id}
+                  initial={{ scale: 1.5, opacity: 0, rotate: 45 }}
+                  animate={{ scale: 1, opacity: 1, rotate: 0 }}
+                  transition={{ type: 'spring', damping: 12 }}
+                  onAnimationComplete={() => advanceQueue(activeDiscardCard.id)}
+                >
+                  <UnoCard card={activeDiscardCard} size="lg" disabled />
+                </motion.div>
+              )}
             </AnimatePresence>
 
             {/* Direction Indicator */}
@@ -473,13 +595,6 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <div className={cn(
-        "fixed bottom-48 left-1/2 -translate-x-1/2 text-white font-black italic text-xl uppercase tracking-widest transition-all duration-300",
-        myPlayer && myPlayer.cards.length === 0 ? "opacity-20 grayscale scale-95" : "opacity-50"
-      )}>
-        {myPlayer?.name} {myPlayer && myPlayer.cards.length === 0 && "(SPECTATING)"}
-      </div>
-
       <Hand
         cards={myPlayer?.cards || []}
         onPlayCards={playCards}
@@ -487,6 +602,8 @@ export default function App() {
         canPlay={canPlay}
         gameMode={roomState.gameMode}
         topCard={topCard}
+        playerName={myPlayer?.name}
+        isSpectator={isSpectator}
       />
 
       {/* Winner Modal (Leaderboard) */}

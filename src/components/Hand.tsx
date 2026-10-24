@@ -14,6 +14,8 @@ interface HandProps {
   canPlay: (card: Card) => boolean;
   gameMode?: GameMode;
   topCard?: Card;
+  playerName?: string;
+  isSpectator?: boolean;
 }
 
 export const Hand: React.FC<HandProps> = ({
@@ -23,6 +25,8 @@ export const Hand: React.FC<HandProps> = ({
   canPlay,
   gameMode = 'normal',
   topCard,
+  playerName,
+  isSpectator,
 }) => {
   const [selectingColor, setSelectingColor] = useState<string | null>(null);
   const [selectedCardIds, setSelectedCardIds] = useState<string[]>([]);
@@ -47,7 +51,7 @@ export const Hand: React.FC<HandProps> = ({
   }, [errorMessage]);
 
   const handleCardClick = (card: Card) => {
-    if (!isMyTurn) return;
+    if (!isMyTurn || isSubmitting) return;
 
     // Rule: Cannot finish with power card (+2 or +4)
     if (cards.length === 1 && isPowerCard(card)) {
@@ -66,6 +70,21 @@ export const Hand: React.FC<HandProps> = ({
             setErrorMessage("This card does not match the current top card!");
             return;
           }
+
+          // Check whether the player holds any other number cards with the same number (exclude currently clicked card)
+          const otherMatchingCards = cards.filter(
+            c => c.id !== card.id && c.value >= '0' && c.value <= '9' && c.value === card.value
+          );
+
+          if (otherMatchingCards.length === 0) {
+            // Automatically play the selected card immediately using existing card-play mechanism!
+            setIsSubmitting(true);
+            onPlayCards([card.id]);
+            setTimeout(() => setIsSubmitting(false), 500);
+            return;
+          }
+
+          // If the player has 1 or more other cards with the same number, keep existing multi-card selection flow
           setSelectedCardIds([card.id]);
           return;
         }
@@ -89,6 +108,20 @@ export const Hand: React.FC<HandProps> = ({
         // Clicked a card with different number
         if (canPlay(card)) {
           // Switch primary selection to this legally playable card
+          // Check if other matching cards exist for this new number:
+          const otherMatchingCards = cards.filter(
+            c => c.id !== card.id && c.value >= '0' && c.value <= '9' && c.value === card.value
+          );
+
+          if (otherMatchingCards.length === 0) {
+            // Auto-play this single card!
+            setIsSubmitting(true);
+            setSelectedCardIds([]);
+            onPlayCards([card.id]);
+            setTimeout(() => setIsSubmitting(false), 500);
+            return;
+          }
+
           setSelectedCardIds([card.id]);
         } else {
           setErrorMessage(`In Special Mode, all cards played together must have the same number (${selectedValue}).`);
@@ -212,17 +245,29 @@ export const Hand: React.FC<HandProps> = ({
         )}
       </AnimatePresence>
 
+      {/* Player's Own Name (Always positioned cleanly above player hand card row) */}
+      {playerName && (
+        <div
+          className={cn(
+            "text-white font-black italic text-base sm:text-lg md:text-xl uppercase tracking-widest transition-all duration-300 pointer-events-none select-none mb-1 sm:mb-2",
+            isSpectator ? "opacity-20 grayscale scale-95" : "opacity-50"
+          )}
+        >
+          {playerName} {isSpectator && "(SPECTATING)"}
+        </div>
+      )}
+
       {/* Special Mode Multi-Card Play Button Bar (Dedicated area ABOVE the Hand Card Row) */}
-      <div className="w-full flex justify-center px-4 mb-1 sm:mb-2 min-h-[52px] pointer-events-auto">
-        <AnimatePresence>
-          {gameMode === 'special' && isMyTurn && selectedCardIds.length > 0 && (
-            <motion.div
-              initial={{ opacity: 0, y: 12, scale: 0.95 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 12, scale: 0.95 }}
-              transition={{ duration: 0.18 }}
-              className="bg-zinc-900 border-4 border-amber-400 text-white px-4 py-2 sm:px-6 sm:py-2.5 rounded-2xl sm:rounded-3xl shadow-[0_12px_36px_rgba(0,0,0,0.85)] z-40 flex items-center gap-3 sm:gap-4 pointer-events-auto max-w-[96vw]"
-            >
+      <AnimatePresence>
+        {gameMode === 'special' && isMyTurn && selectedCardIds.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 12, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 12, scale: 0.95 }}
+            transition={{ duration: 0.18 }}
+            className="w-full flex justify-center px-4 mb-1 sm:mb-2 pointer-events-auto"
+          >
+            <div className="bg-zinc-900 border-4 border-amber-400 text-white px-4 py-2 sm:px-6 sm:py-2.5 rounded-2xl sm:rounded-3xl shadow-[0_12px_36px_rgba(0,0,0,0.85)] z-40 flex items-center gap-3 sm:gap-4 max-w-[96vw]">
               <div className="flex items-center gap-2">
                 <Layers size={18} className="text-amber-400 animate-pulse shrink-0" />
                 <div className="flex flex-col">
@@ -264,10 +309,10 @@ export const Hand: React.FC<HandProps> = ({
                   {selectedCardIds.length > 1 ? `PLAY (${selectedCardIds.length}) CARDS` : 'PLAY CARD'}
                 </button>
               </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Hand Container (Cards Row, completely below the Play Button container) */}
       <div className="max-w-7xl w-full mx-auto flex justify-center pointer-events-auto overflow-x-auto overflow-y-visible no-scrollbar pt-8 pb-3 sm:pb-4 px-4 sm:px-8">

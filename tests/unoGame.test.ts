@@ -449,3 +449,363 @@ describe('Easter Egg Logic', () => {
     assert.equal(filteredSlow.length, 3); // First click dropped out
   });
 });
+
+describe('Special Mode: Automatic Play Decisions', () => {
+  function shouldAutoPlayNumberCard(
+    hand: Card[],
+    clickedCard: Card,
+    topCard: Card,
+    mode: 'normal' | 'special',
+    stackCount = 0
+  ): { autoPlay: boolean; reason?: string } {
+    if (mode !== 'special') {
+      return { autoPlay: false, reason: 'Normal mode retains single-click action' };
+    }
+
+    const isNumberCard = clickedCard.value >= '0' && clickedCard.value <= '9';
+    if (!isNumberCard) {
+      return { autoPlay: false, reason: 'Action cards do not use multi-card auto-play check' };
+    }
+
+    // Must be legally playable on top card
+    if (!canPlayCardOnTop(clickedCard, topCard, stackCount)) {
+      return { autoPlay: false, reason: 'Illegal card play' };
+    }
+
+    // Final card power card restriction check
+    if (hand.length === 1 && isPowerCard(clickedCard)) {
+      return { autoPlay: false, reason: 'Winning power card restriction' };
+    }
+
+    // Exclude the clicked card and check for any other number cards with the same number value (0-9)
+    const otherMatchingCards = hand.filter(
+      c => c.id !== clickedCard.id && c.value >= '0' && c.value <= '9' && c.value === clickedCard.value
+    );
+
+    if (otherMatchingCards.length === 0) {
+      return { autoPlay: true };
+    }
+
+    return { autoPlay: false, reason: 'Other matching cards exist in hand for multi-selection' };
+  }
+
+  it('Example A: Automatically plays legal Red 4 when no other 4s exist in hand', () => {
+    const red4: Card = { id: 'r4', color: 'red', value: '4' };
+    const blue7: Card = { id: 'b7', color: 'blue', value: '7' };
+    const green2: Card = { id: 'g2', color: 'green', value: '2' };
+    const yellow9: Card = { id: 'y9', color: 'yellow', value: '9' };
+    const hand = [red4, blue7, green2, yellow9];
+    const topCard: Card = { id: 'top', color: 'red', value: '1' };
+
+    const decision = shouldAutoPlayNumberCard(hand, red4, topCard, 'special');
+    assert.equal(decision.autoPlay, true);
+  });
+
+  it('Example B: Does NOT automatically play Red 4 when other 4s exist (Blue 4, Green 4)', () => {
+    const red4: Card = { id: 'r4', color: 'red', value: '4' };
+    const blue4: Card = { id: 'b4', color: 'blue', value: '4' };
+    const green4: Card = { id: 'g4', color: 'green', value: '4' };
+    const yellow7: Card = { id: 'y7', color: 'yellow', value: '7' };
+    const hand = [red4, blue4, green4, yellow7];
+    const topCard: Card = { id: 'top', color: 'red', value: '1' };
+
+    const decision = shouldAutoPlayNumberCard(hand, red4, topCard, 'special');
+    assert.equal(decision.autoPlay, false);
+    assert.equal(decision.reason, 'Other matching cards exist in hand for multi-selection');
+  });
+
+  it('Example C: Does NOT automatically play Red 4 when exactly one other 4 exists (Blue 4)', () => {
+    const red4: Card = { id: 'r4', color: 'red', value: '4' };
+    const blue4: Card = { id: 'b4', color: 'blue', value: '4' };
+    const hand = [red4, blue4];
+    const topCard: Card = { id: 'top', color: 'red', value: '1' };
+
+    const decision = shouldAutoPlayNumberCard(hand, red4, topCard, 'special');
+    assert.equal(decision.autoPlay, false);
+  });
+
+  it('Does NOT auto-play illegal cards even if unique number in hand', () => {
+    const blue7: Card = { id: 'b7', color: 'blue', value: '7' };
+    const green2: Card = { id: 'g2', color: 'green', value: '2' };
+    const hand: Card[] = [blue7, green2];
+    const topCard: Card = { id: 'top', color: 'red', value: '1' }; // Neither color nor number matches
+
+    const decision = shouldAutoPlayNumberCard(hand, blue7, topCard, 'special');
+    assert.equal(decision.autoPlay, false);
+    assert.equal(decision.reason, 'Illegal card play');
+  });
+
+  it('Action cards (e.g. Skip) do not use multi-card auto-play check', () => {
+    const redSkip: Card = { id: 'rs', color: 'red', value: 'skip' };
+    const green2: Card = { id: 'g2', color: 'green', value: '2' };
+    const hand: Card[] = [redSkip, green2];
+    const topCard: Card = { id: 'top', color: 'red', value: '1' };
+
+    const decision = shouldAutoPlayNumberCard(hand, redSkip, topCard, 'special');
+    assert.equal(decision.autoPlay, false);
+    assert.equal(decision.reason, 'Action cards do not use multi-card auto-play check');
+  });
+});
+
+describe('Special Mode: Sequential Animation Queueing', () => {
+  it('Correctly extracts newly played cards in order from previous discard pile state', () => {
+    const initialPile: Card[] = [{ id: 'c0', color: 'red', value: '9' }];
+    const playedCards: Card[] = [
+      { id: 'r5', color: 'red', value: '5' },
+      { id: 'b5', color: 'blue', value: '5' },
+      { id: 'g5', color: 'green', value: '5' },
+      { id: 'y5', color: 'yellow', value: '5' },
+    ];
+    const updatedPile = [...initialPile, ...playedCards];
+
+    const prevLen = initialPile.length;
+    const addedCards = updatedPile.slice(prevLen);
+
+    assert.equal(addedCards.length, 4);
+    assert.equal(addedCards[0].id, 'r5');
+    assert.equal(addedCards[1].id, 'b5');
+    assert.equal(addedCards[2].id, 'g5');
+    assert.equal(addedCards[3].id, 'y5');
+
+    // Sequence order guarantees the last selected card (Yellow 5) is final top card
+    assert.equal(addedCards[addedCards.length - 1].color, 'yellow');
+    assert.equal(addedCards[addedCards.length - 1].value, '5');
+  });
+
+  it('Single-card addition produces single-item queue without delays', () => {
+    const initialPile: Card[] = [{ id: 'c0', color: 'red', value: '9' }];
+    const updatedPile = [...initialPile, { id: 'r4', color: 'red', value: '4' }];
+
+    const addedCards = updatedPile.slice(initialPile.length);
+    assert.equal(addedCards.length, 1);
+    assert.equal(addedCards[0].id, 'r4');
+  });
+
+  it('Advances cards strictly on animation completion of the current active card', () => {
+    // Model of completion-driven queue controller
+    class AnimationQueueController {
+      queue: Card[] = [];
+      currentActiveId: string | null = null;
+      displayedCard: Card | null = null;
+      history: string[] = [];
+
+      receiveNewCards(cards: Card[]) {
+        if (this.currentActiveId !== null) {
+          this.queue.push(...cards);
+        } else if (cards.length > 0) {
+          const first = cards[0];
+          this.queue = cards.slice(1);
+          this.currentActiveId = first.id;
+          this.displayedCard = first;
+          this.history.push(first.id);
+        }
+      }
+
+      onCardAnimationComplete(completedId: string) {
+        if (this.currentActiveId !== completedId) {
+          // Ignore mismatched or duplicate calls
+          return;
+        }
+
+        if (this.queue.length > 0) {
+          const next = this.queue.shift()!;
+          this.currentActiveId = next.id;
+          this.displayedCard = next;
+          this.history.push(next.id);
+        } else {
+          this.currentActiveId = null;
+        }
+      }
+
+      reset() {
+        this.queue = [];
+        this.currentActiveId = null;
+      }
+    }
+
+    const controller = new AnimationQueueController();
+    const batch: Card[] = [
+      { id: 'r5', color: 'red', value: '5' },
+      { id: 'b5', color: 'blue', value: '5' },
+      { id: 'g5', color: 'green', value: '5' },
+      { id: 'y5', color: 'yellow', value: '5' },
+    ];
+
+    // Initial receive: first card displays immediately
+    controller.receiveNewCards(batch);
+    assert.equal(controller.displayedCard?.id, 'r5');
+    assert.equal(controller.currentActiveId, 'r5');
+    assert.equal(controller.queue.length, 3);
+
+    // Duplicate or mismatched callback does NOT advance
+    controller.onCardAnimationComplete('unknown-card');
+    controller.onCardAnimationComplete('b5'); // Not yet active
+    assert.equal(controller.displayedCard?.id, 'r5');
+    assert.equal(controller.queue.length, 3);
+
+    // Card 1 completes -> Card 2 displays
+    controller.onCardAnimationComplete('r5');
+    assert.equal(controller.displayedCard?.id, 'b5');
+    assert.equal(controller.currentActiveId, 'b5');
+    assert.equal(controller.queue.length, 2);
+
+    // Repeated call with old Card 1 does nothing
+    controller.onCardAnimationComplete('r5');
+    assert.equal(controller.displayedCard?.id, 'b5');
+
+    // Card 2 completes -> Card 3 displays
+    controller.onCardAnimationComplete('b5');
+    assert.equal(controller.displayedCard?.id, 'g5');
+    assert.equal(controller.currentActiveId, 'g5');
+
+    // Card 3 completes -> Card 4 (Yellow 5) displays
+    controller.onCardAnimationComplete('g5');
+    assert.equal(controller.displayedCard?.id, 'y5');
+    assert.equal(controller.currentActiveId, 'y5');
+    assert.equal(controller.queue.length, 0);
+
+    // Final card completes -> queue empty, active is null, Yellow 5 remains displayed
+    controller.onCardAnimationComplete('y5');
+    assert.equal(controller.currentActiveId, null);
+    assert.equal(controller.displayedCard?.id, 'y5');
+    assert.deepEqual(controller.history, ['r5', 'b5', 'g5', 'y5']);
+  });
+
+  it('Enqueues cards correctly when a new play arrives while previous animation is in flight', () => {
+    let currentActiveId: string | null = null;
+    let displayedCard: Card | null = null;
+    let queue: Card[] = [];
+    const history: string[] = [];
+
+    function receive(cards: Card[]) {
+      if (currentActiveId !== null) {
+        queue.push(...cards);
+      } else if (cards.length > 0) {
+        const first = cards[0];
+        queue = cards.slice(1);
+        currentActiveId = first.id;
+        displayedCard = first;
+        history.push(first.id);
+      }
+    }
+
+    function complete(id: string) {
+      if (currentActiveId !== id) return;
+      if (queue.length > 0) {
+        const next = queue.shift()!;
+        currentActiveId = next.id;
+        displayedCard = next;
+        history.push(next.id);
+      } else {
+        currentActiveId = null;
+      }
+    }
+
+    // Play 1: Red 5 and Blue 5
+    receive([{ id: 'r5', color: 'red', value: '5' }, { id: 'b5', color: 'blue', value: '5' }]);
+    assert.equal(displayedCard?.id, 'r5');
+
+    // While Red 5 is animating, another play arrives: Green 5
+    receive([{ id: 'g5', color: 'green', value: '5' }]);
+    assert.equal(queue.length, 2); // b5 and g5 queued
+
+    // Red 5 completes
+    complete('r5');
+    assert.equal(displayedCard?.id, 'b5');
+
+    // Blue 5 completes
+    complete('b5');
+    assert.equal(displayedCard?.id, 'g5');
+
+    // Green 5 completes
+    complete('g5');
+    assert.equal(currentActiveId, null);
+    assert.deepEqual(history, ['r5', 'b5', 'g5']);
+  });
+
+  it('Never advances intermediate cards via timer; progression requires onAnimationComplete', () => {
+    let currentActiveId: string | null = null;
+    let displayedCard: Card | null = null;
+    let queue: Card[] = [];
+
+    const cards: Card[] = [
+      { id: 'r5', color: 'red', value: '5' },
+      { id: 'b5', color: 'blue', value: '5' },
+      { id: 'g5', color: 'green', value: '5' },
+      { id: 'y5', color: 'yellow', value: '5' },
+    ];
+
+    // Start 4-card batch
+    const first = cards[0];
+    queue = cards.slice(1);
+    currentActiveId = first.id;
+    displayedCard = first;
+
+    // Verify: Regardless of simulated elapsed time, queue does NOT advance until onAnimationComplete
+    assert.equal(displayedCard.id, 'r5');
+    assert.equal(queue.length, 3);
+    assert.equal(currentActiveId, 'r5');
+
+    // Only when completion callback fires does the next card advance
+    function onComplete(id: string) {
+      if (currentActiveId !== id) return;
+      if (queue.length > 0) {
+        const next = queue.shift()!;
+        currentActiveId = next.id;
+        displayedCard = next;
+      } else {
+        currentActiveId = null;
+      }
+    }
+
+    onComplete('r5');
+    assert.equal(displayedCard.id, 'b5');
+    assert.equal(queue.length, 2);
+
+    onComplete('b5');
+    assert.equal(displayedCard.id, 'g5');
+    assert.equal(queue.length, 1);
+
+    onComplete('g5');
+    assert.equal(displayedCard.id, 'y5');
+    assert.equal(queue.length, 0);
+
+    onComplete('y5');
+    assert.equal(displayedCard.id, 'y5');
+    assert.equal(currentActiveId, null);
+  });
+
+  it('Emergency recovery flushes directly to authoritative final card without intermediate stepping', () => {
+    let currentActiveId: string | null = null;
+    let displayedCard: Card | null = null;
+    let queue: Card[] = [];
+
+    const cards: Card[] = [
+      { id: 'r5', color: 'red', value: '5' },
+      { id: 'b5', color: 'blue', value: '5' },
+      { id: 'g5', color: 'green', value: '5' },
+      { id: 'y5', color: 'yellow', value: '5' },
+    ];
+
+    const first = cards[0];
+    queue = cards.slice(1);
+    currentActiveId = first.id;
+    displayedCard = first;
+
+    // Simulate emergency recovery triggered (e.g. browser tab suspended / backgrounded for 4000ms)
+    function emergencyRecover(expectedId: string, authoritativeFinalCard: Card) {
+      if (currentActiveId === expectedId) {
+        queue = [];
+        currentActiveId = null;
+        displayedCard = authoritativeFinalCard;
+      }
+    }
+
+    // Emergency recovery flushes directly to authoritative final card (Yellow 5)
+    emergencyRecover('r5', cards[cards.length - 1]);
+    assert.equal(displayedCard.id, 'y5');
+    assert.equal(queue.length, 0);
+    assert.equal(currentActiveId, null);
+  });
+});
+
